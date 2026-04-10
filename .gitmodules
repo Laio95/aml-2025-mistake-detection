@@ -1,3 +1,6 @@
 [submodule "annotations"]
 	path = annotations
 	url = https://github.com/CaptainCook4D/annotations
+[submodule "EgoVLP"]
+	path = EgoVLP
+	url = https://github.com/showlab/EgoVLP.git
