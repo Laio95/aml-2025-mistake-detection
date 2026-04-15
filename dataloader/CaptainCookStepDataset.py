@@ -259,7 +259,7 @@ class CaptainCookStepDataset(Dataset):
         step_features = None
         step_labels = None
         
-        assert self._backbone in [const.OMNIVORE, const.SLOWFAST], "Only Omnivore and SlowFast are supported with this codebase"
+        assert self._backbone in [const.OMNIVORE, const.SLOWFAST, const.EGOVLP], "Only Omnivore, SlowFast and EgoVLP are supported with this codebase"
         step_features, step_labels = self._get_video_features(recording_id, step_start_end_list)
 
         assert step_features is not None, f"Features not found for recording_id: {recording_id}"

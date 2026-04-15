@@ -19,6 +19,9 @@ def fetch_input_dim(config, decoder=False):
         return 400
     elif config.backbone == const.RESNET3D:
         return 400
+    elif config.backbone == const.EGOVLP:
+        # EgoVLP FrozenInTime compute_video() projected embedding dim
+        return 256
     elif config.backbone == const.IMAGEBIND:
         if decoder is True:
             return 1024

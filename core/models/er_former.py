@@ -31,6 +31,12 @@ class ErFormer(nn.Module):
         text_output = None
         depth_output = None
 
+        # For single-modality backbones whose feature dim is not 1024 (e.g. EgoVLP=256),
+        # skip the multimodal 1024-chunk splitting logic and use the full encoded output.
+        if dim < 1024 or dim % 1024 != 0:
+            final_output = self.decoder(encoded_output)
+            return final_output
+        
         # Split the encoded output into video, audio, text and depth outputs
         # Modality Order: Video, Audio, Text, Depth
         video_output = encoded_output[:, :1024]
