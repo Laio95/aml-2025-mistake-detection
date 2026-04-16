@@ -31,6 +31,11 @@ def parse_arguments():
                         help="Path to egovlp.pth checkpoint (required for backbone=egovlp)")
     parser.add_argument("--num_frames", type=int, default=4,
                         help="Frames sampled per clip for EgoVLP")
+    parser.add_argument("--videos_dir", type=str,
+                        default="/data/rohith/captain_cook/data/gopro/resolution_360p",
+                        help="Directory containing input .mp4 files")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Directory where .npz feature files will be saved")
     return parser.parse_args()
 
 
@@ -325,8 +330,8 @@ def main_hololens(is_sequential=False):
 
 # Main
 def main():
-    video_files_path = "/data/rohith/captain_cook/data/gopro/resolution_360p"
-    output_features_path = f"/data/rohith/captain_cook/features/gopro/segments/{method}/"
+    video_files_path = args.videos_dir
+    output_features_path = args.output_dir or f"/data/rohith/captain_cook/features/gopro/segments/{method}/"
 
     video_transform = get_video_transformation(method, num_frames=args.num_frames)
     feature_extractor = get_feature_extractor(
