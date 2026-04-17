@@ -5,6 +5,9 @@ import os
 import sys
 import numpy as np
 import torch
+# torchvision >=0.16 removed functional_tensor; patch for pytorchvideo compatibility
+import torchvision.transforms.functional as _F_compat
+sys.modules.setdefault("torchvision.transforms.functional_tensor", _F_compat)
 from pytorchvideo.data.encoded_video import EncodedVideo
 from pytorchvideo.transforms import (
     ApplyTransformToKey,
