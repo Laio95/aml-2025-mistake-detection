@@ -32,8 +32,6 @@ def parse_arguments():
                         help="Path to cloned EgoVLP repo (required for backbone=egovlp)")
     parser.add_argument("--egovlp_ckpt", type=str, default=None,
                         help="Path to egovlp.pth checkpoint (required for backbone=egovlp)")
-    parser.add_argument("--num_frames", type=int, default=4,
-                        help="Frames sampled per clip for EgoVLP")
     parser.add_argument("--videos_dir", type=str,
                         default="/data/rohith/captain_cook/data/gopro/resolution_360p",
                         help="Directory containing input .mp4 files")
@@ -42,7 +40,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def _build_egovlp_model(egovlp_repo: str, ckpt_path: str, num_frames: int, device: torch.device):
+def _build_egovlp_model(egovlp_repo: str, ckpt_path: str, device: torch.device):
     """Load FrozenInTime (EgoVLP) with manual checkpoint fixing.
 
     torch.hub is not used because EgoVLP requires sys.path injection and
@@ -54,14 +52,14 @@ def _build_egovlp_model(egovlp_repo: str, ckpt_path: str, num_frames: int, devic
 
     cwd = os.getcwd()
     os.chdir(egovlp_repo)
-    from model.model import FrozenInTime                 # noqa: E402
-    from utils.util import state_dict_data_parallel_fix  # noqa: E402
+    from model.model import FrozenInTime                 
+    from utils.util import state_dict_data_parallel_fix  
 
     model = FrozenInTime(
         video_params={
             "model": "SpaceTimeTransformer",
             "arch_config": "base_patch16_224",
-            "num_frames": num_frames,
+            "num_frames": 16,
             "pretrained": True,
             "time_init": "zeros",
         },
@@ -166,7 +164,7 @@ def extract_features(video_data_raw, feature_extractor, transforms_to_apply, met
 
 
 # Model Initialization
-def get_video_transformation(name, num_frames=4):
+def get_video_transformation(name):
     if name == "omnivore":
         from omnivore_transforms import SpatialCrop, TemporalCrop  # noqa: E402
         num_frames = 32
@@ -272,24 +270,28 @@ def get_video_transformation(name, num_frames=4):
             ]
         )
     elif name == "egovlp":
-        # num_frames injected from args at call site
+        side_size = 224
+        crop_size = 224
+        mean=[0.485, 0.456, 0.406]
+        std=[0.229, 0.224, 0.225]
+        num_frames = 16
         video_transform = Compose(
             [
                 UniformTemporalSubsample(num_frames),
                 Lambda(lambda x: x / 255.0),
-                ShortSideScale(size=224),
-                CenterCropVideo(224),
-                NormalizeVideo(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                NormalizeVideo(mean, std),
+                ShortSideScale(side_size),
+                CenterCropVideo(crop_size),  
             ]
         )
     return ApplyTransformToKey(key="video", transform=video_transform)
 
 
-def get_feature_extractor(name, device="cuda", egovlp_repo=None, egovlp_ckpt=None, num_frames=4):
+def get_feature_extractor(name, device="cuda", egovlp_repo=None, egovlp_ckpt=None):
     if name == "egovlp":
         if not egovlp_repo or not egovlp_ckpt:
             raise ValueError("egovlp_repo and egovlp_ckpt are required for backbone=egovlp")
-        return _build_egovlp_model(egovlp_repo, egovlp_ckpt, num_frames, torch.device(device))
+        return _build_egovlp_model(egovlp_repo, egovlp_ckpt, torch.device(device))
     if name == "omnivore":
         model_name = "omnivore_swinB_epic"
         model = torch.hub.load("facebookresearch/omnivore:main", model=model_name)
@@ -310,25 +312,25 @@ def get_feature_extractor(name, device="cuda", egovlp_repo=None, egovlp_ckpt=Non
     return feature_extractor
 
 
-def main_hololens(is_sequential=False):
-    hololens_directory_path = "/data/rohith/captain_cook/data/hololens/"
-    output_features_path = f"/data/rohith/captain_cook/features/hololens/segments/{method}/"
+#def main_hololens(is_sequential=False):
+    # hololens_directory_path = "/data/rohith/captain_cook/data/hololens/"
+    # output_features_path = f"/data/rohith/captain_cook/features/hololens/segments/{method}/"
 
-    video_transform = get_video_transformation(method)
-    feature_extractor = get_feature_extractor(method)
+    # video_transform = get_video_transformation(method)
+    # feature_extractor = get_feature_extractor(method)
 
-    processor = VideoProcessor(method, feature_extractor, video_transform)
+    # processor = VideoProcessor(method, feature_extractor, video_transform)
 
-    if not is_sequential:
-        num_threads = 10
-        with concurrent.futures.ThreadPoolExecutor(num_threads) as executor:
-            for recording_id in os.listdir(hololens_directory_path):
-                video_file_path = os.path.join(hololens_directory_path, recording_id, "sync", "pv")
-                executor.submit(processor.process_video, recording_id, video_file_path, output_features_path)
-    else:
-        for recording_id in os.listdir(hololens_directory_path):
-            video_file_path = os.path.join(hololens_directory_path, recording_id, "sync", "pv")
-            processor.process_video(recording_id, video_file_path, output_features_path)
+    # if not is_sequential:
+    #     num_threads = 10
+    #     with concurrent.futures.ThreadPoolExecutor(num_threads) as executor:
+    #         for recording_id in os.listdir(hololens_directory_path):
+    #             video_file_path = os.path.join(hololens_directory_path, recording_id, "sync", "pv")
+    #             executor.submit(processor.process_video, recording_id, video_file_path, output_features_path)
+    # else:
+    #     for recording_id in os.listdir(hololens_directory_path):
+    #         video_file_path = os.path.join(hololens_directory_path, recording_id, "sync", "pv")
+    #         processor.process_video(recording_id, video_file_path, output_features_path)
 
 
 # Main
@@ -336,12 +338,11 @@ def main():
     video_files_path = args.videos_dir
     output_features_path = args.output_dir or f"/data/rohith/captain_cook/features/gopro/segments/{method}/"
 
-    video_transform = get_video_transformation(method, num_frames=args.num_frames)
+    video_transform = get_video_transformation(method)
     feature_extractor = get_feature_extractor(
         method,
         egovlp_repo=args.egovlp_repo,
         egovlp_ckpt=args.egovlp_ckpt,
-        num_frames=args.num_frames,
     )
 
     processor = VideoProcessor(method, feature_extractor, video_transform)
