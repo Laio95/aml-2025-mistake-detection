@@ -42,6 +42,8 @@ def parse_arguments():
                         help="Path to egovlp.pth checkpoint (required for backbone=egovlp)")
     parser.add_argument("--use_decord", action="store_true", default=False,
                         help="Use decord for faster video decoding (requires pip install decord)")
+    parser.add_argument("--batch_size", type=int, default=8,
+                        help="Clips per GPU forward pass when --use_decord is set (default: 8)")
     parser.add_argument("--videos_dir", type=str,
                         default="/data/rohith/captain_cook/data/gopro/resolution_360p",
                         help="Directory containing input .mp4 files")
@@ -93,13 +95,44 @@ def _build_egovlp_model(egovlp_repo: str, ckpt_path: str, device: torch.device):
     return model.eval().to(device)
 
 
+def _infer_batch(clips, feature_extractor, method, device):
+    """Run a single batched forward pass on a list of transformed clip tensors.
+
+    Each clip is already in [C, T, H, W] format (output of ApplyTransformToKey).
+    Returns a list of [1, D] numpy arrays, one per input clip.
+
+    slowfast and omnivore have multi-input formats that require per-clip inference;
+    they fall back to sequential calls rather than true batching.
+    """
+    with torch.no_grad():
+        if method == "egovlp":
+            # [B, C, T, H, W] → [B, T, C, H, W] as expected by compute_video
+            batch = torch.stack(clips).permute(0, 2, 1, 3, 4).to(device)
+            out = feature_extractor.compute_video(batch)  # [B, D]
+        elif method in ("x3d", "3dresnet"):
+            batch = torch.stack(clips).to(device)  # [B, C, T, H, W]
+            out = feature_extractor(batch)          # [B, D]
+        else:
+            # slowfast (two-pathway list) and omnivore (multi-crop list) are not batchable here
+            results = []
+            for clip in clips:
+                if method == "slowfast":
+                    inp = [p.to(device)[None, ...] for p in clip]
+                else:  # omnivore
+                    inp = clip[0][None, ...].to(device)
+                results.append(feature_extractor(inp).cpu().numpy())
+            return results
+    return [out[i : i + 1].cpu().numpy() for i in range(len(clips))]
+
+
 # Video Processing
 class VideoProcessor:
-    def __init__(self, method, feature_extractor, video_transform, use_decord=False):
+    def __init__(self, method, feature_extractor, video_transform, use_decord=False, batch_size=8):
         self.method = method
         self.feature_extractor = feature_extractor
         self.video_transform = video_transform
         self.use_decord = use_decord
+        self.batch_size = batch_size
 
         self.fps = 30
         self.num_frames_per_feature = 30
@@ -132,7 +165,9 @@ class VideoProcessor:
 
             logger.info(f"video: {video_name} video_duration: {video_duration} s")
             segment_end = max(video_duration - segment_size + 1, 1)
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+            batch_clips = []
             for start_time in tqdm(np.arange(0, segment_end, segment_size),
                                    desc=f"Processing video segments for video {video_name}"):
                 end_time = min(start_time + segment_size, video_duration)
@@ -148,13 +183,17 @@ class VideoProcessor:
                 frames = vr.get_batch(list(range(start_frame, end_frame)))
                 segment_video_inputs = torch.from_numpy(frames.asnumpy()).permute(3, 0, 1, 2)
 
-                segment_features = extract_features(
-                    video_data_raw=segment_video_inputs,
-                    feature_extractor=self.feature_extractor,
-                    transforms_to_apply=self.video_transform,
-                    method=self.method
-                )
-                video_features.append(segment_features)
+                # apply transforms (CPU-bound); result is [C, T, H, W]
+                transformed = self.video_transform({"video": segment_video_inputs, "audio": None})
+                batch_clips.append(transformed["video"])
+
+                if len(batch_clips) == self.batch_size:
+                    video_features.extend(_infer_batch(batch_clips, self.feature_extractor, self.method, device))
+                    batch_clips = []
+
+            # flush remaining clips that didn't fill a full batch
+            if batch_clips:
+                video_features.extend(_infer_batch(batch_clips, self.feature_extractor, self.method, device))
         else:    # old method not optimized 
             video = EncodedVideo.from_path(video_path)
             video_duration = video.duration
@@ -394,7 +433,7 @@ def main():
     if args.use_decord and not _DECORD_AVAILABLE:
         raise RuntimeError("--use_decord requires decord: pip install decord")
 
-    processor = VideoProcessor(method, feature_extractor, video_transform, use_decord=args.use_decord)
+    processor = VideoProcessor(method, feature_extractor, video_transform, use_decord=args.use_decord, batch_size=args.batch_size)
 
     mp4_files = [file for file in os.listdir(video_files_path) if file.endswith(".mp4")]
 
