@@ -22,6 +22,14 @@ from torchvision.transforms import Compose, Lambda
 from torchvision.transforms._transforms_video import NormalizeVideo, CenterCropVideo
 from natsort import natsorted
 
+try:
+    # decord is optional: faster video decoding via NVDEC (GPU) or its CPU fallback.
+    # get_batch() returns decord NDArray; .asnumpy() or torch conversion handled per call.
+    from decord import VideoReader, cpu, gpu as decord_gpu
+    _DECORD_AVAILABLE = True
+except ImportError:
+    _DECORD_AVAILABLE = False
+
 
 # Argument Parsing
 def parse_arguments():
@@ -32,6 +40,8 @@ def parse_arguments():
                         help="Path to cloned EgoVLP repo (required for backbone=egovlp)")
     parser.add_argument("--egovlp_ckpt", type=str, default=None,
                         help="Path to egovlp.pth checkpoint (required for backbone=egovlp)")
+    parser.add_argument("--use_decord", action="store_true", default=False,
+                        help="Use decord for faster video decoding (requires pip install decord)")
     parser.add_argument("--videos_dir", type=str,
                         default="/data/rohith/captain_cook/data/gopro/resolution_360p",
                         help="Directory containing input .mp4 files")
@@ -85,10 +95,11 @@ def _build_egovlp_model(egovlp_repo: str, ckpt_path: str, device: torch.device):
 
 # Video Processing
 class VideoProcessor:
-    def __init__(self, method, feature_extractor, video_transform):
+    def __init__(self, method, feature_extractor, video_transform, use_decord=False):
         self.method = method
         self.feature_extractor = feature_extractor
         self.video_transform = video_transform
+        self.use_decord = use_decord
 
         self.fps = 30
         self.num_frames_per_feature = 30
@@ -105,33 +116,68 @@ class VideoProcessor:
 
         os.makedirs(output_features_path, exist_ok=True)
 
-        video = EncodedVideo.from_path(video_path)
-        video_duration = video.duration - 0.0
-
-        logger.info(f"video: {video_name} video_duration: {video_duration} s")
-        segment_end = max(video_duration - segment_size + 1, 1)
         stride = 1
-
         video_features = []
-        for start_time in tqdm(np.arange(0, segment_end, segment_size),
-                               desc=f"Processing video segments for video {video_name}"):
-            end_time = start_time + segment_size
-            end_time = min(end_time, video_duration)
 
-            if end_time - start_time < 0.04:
-                continue
+        if self.use_decord:
+            # GPU decode (NVDEC): frames land in VRAM directly, no CPU→GPU copy.
+            # Falls back to CPU decode if NVDEC is unavailable (e.g. no CUDA driver).
+            try:
+                vr = VideoReader(video_path, ctx=decord_gpu(0))
+            except Exception:
+                vr = VideoReader(video_path, ctx=cpu(0))
+            video_fps = vr.get_avg_fps()
+            total_frames = len(vr)
+            video_duration = total_frames / video_fps
 
-            video_data = video.get_clip(start_sec=start_time, end_sec=end_time)
-            segment_video_inputs = video_data["video"]
+            logger.info(f"video: {video_name} video_duration: {video_duration} s")
+            segment_end = max(video_duration - segment_size + 1, 1)
 
-            segment_features = extract_features(
-                video_data_raw=segment_video_inputs,
-                feature_extractor=self.feature_extractor,
-                transforms_to_apply=self.video_transform,
-                method=self.method
-            )
+            for start_time in tqdm(np.arange(0, segment_end, segment_size),
+                                   desc=f"Processing video segments for video {video_name}"):
+                end_time = min(start_time + segment_size, video_duration)
+                if end_time - start_time < 0.04:
+                    continue
 
-            video_features.append(segment_features)
+                start_frame = int(start_time * video_fps)
+                end_frame = min(int(end_time * video_fps), total_frames - 1)
+                if end_frame <= start_frame:
+                    continue
+
+                # get_batch returns decord NDArray [T, H, W, C] uint8; convert to torch [C, T, H, W]
+                frames = vr.get_batch(list(range(start_frame, end_frame)))
+                segment_video_inputs = torch.from_numpy(frames.asnumpy()).permute(3, 0, 1, 2)
+
+                segment_features = extract_features(
+                    video_data_raw=segment_video_inputs,
+                    feature_extractor=self.feature_extractor,
+                    transforms_to_apply=self.video_transform,
+                    method=self.method
+                )
+                video_features.append(segment_features)
+        else:    # old method not optimized 
+            video = EncodedVideo.from_path(video_path)
+            video_duration = video.duration
+
+            logger.info(f"video: {video_name} video_duration: {video_duration} s")
+            segment_end = max(video_duration - segment_size + 1, 1)
+
+            for start_time in tqdm(np.arange(0, segment_end, segment_size),
+                                   desc=f"Processing video segments for video {video_name}"):
+                end_time = min(start_time + segment_size, video_duration)
+                if end_time - start_time < 0.04:
+                    continue
+
+                video_data = video.get_clip(start_sec=start_time, end_sec=end_time)
+                segment_video_inputs = video_data["video"]
+
+                segment_features = extract_features(
+                    video_data_raw=segment_video_inputs,
+                    feature_extractor=self.feature_extractor,
+                    transforms_to_apply=self.video_transform,
+                    method=self.method
+                )
+                video_features.append(segment_features)
 
         video_features = np.vstack(video_features)
         np.savez(f"{output_file_path}_{int(segment_size)}s_{int(stride)}s.npz", video_features)
@@ -345,7 +391,10 @@ def main():
         egovlp_ckpt=args.egovlp_ckpt,
     )
 
-    processor = VideoProcessor(method, feature_extractor, video_transform)
+    if args.use_decord and not _DECORD_AVAILABLE:
+        raise RuntimeError("--use_decord requires decord: pip install decord")
+
+    processor = VideoProcessor(method, feature_extractor, video_transform, use_decord=args.use_decord)
 
     mp4_files = [file for file in os.listdir(video_files_path) if file.endswith(".mp4")]
 
