@@ -99,7 +99,7 @@ class VideoProcessor:
         segment_size = self.fps / self.num_frames_per_feature
         video_path = os.path.join(video_directory_path, f"{video_name}.mp4" if "mp4" not in video_name else video_name)
 
-        output_file_path = os.path.join(output_features_path, video_name)
+        output_file_path = os.path.join(output_features_path, video_name.replace('_224', ''))
 
         if os.path.exists(f"{output_file_path}_{int(segment_size)}s_{int(1)}s.npz"):
             logger.info(f"Skipping video: {video_name}")
