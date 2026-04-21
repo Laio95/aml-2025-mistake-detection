@@ -107,7 +107,8 @@ def _infer_batch(clips, feature_extractor, method, device):
     with torch.no_grad():
         if method == "egovlp":
             # [B, C, T, H, W] → [B, T, C, H, W] as expected by compute_video
-            batch = torch.stack(clips).permute(0, 2, 1, 3, 4).to(device)
+            # .contiguous() required: permute makes strides non-contiguous, view() inside EgoVLP would fail
+            batch = torch.stack(clips).permute(0, 2, 1, 3, 4).contiguous().to(device)
             out = feature_extractor.compute_video(batch)  # [B, D]
         elif method in ("x3d", "3dresnet"):
             batch = torch.stack(clips).to(device)  # [B, C, T, H, W]
