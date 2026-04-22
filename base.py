@@ -329,6 +329,7 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     total_samples = 0
     all_targets = []
     all_outputs = []
+    all_error_category  = []
 
     test_loader = tqdm(test_loader)
     num_batches = len(test_loader)
@@ -338,16 +339,17 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     counter = 0
 
     with torch.no_grad():
-        for data, target in test_loader:
+        for data, target, e_category in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
             total_samples += data.shape[0]
             loss = criterion(output, target)
             test_losses.append(loss.item())
-
+            
             sigmoid_output = output.sigmoid()
             all_outputs.append(sigmoid_output.detach().cpu().numpy().reshape(-1))
             all_targets.append(target.detach().cpu().numpy().reshape(-1))
+            all_error_category.append(e_category)
 
             test_step_start_end_list.append((counter, counter + data.shape[0]))
             counter += data.shape[0]
@@ -358,6 +360,7 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     # Flatten lists
     all_outputs = np.concatenate(all_outputs)
     all_targets = np.concatenate(all_targets)
+    
 
     # Assert that none of the outputs are NaN
     assert not np.isnan(all_outputs).any(), "Outputs contain NaN values"
