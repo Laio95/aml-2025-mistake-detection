@@ -196,25 +196,28 @@ class CaptainCookStepDataset(Dataset):
 
     def _build_task_specific_features_labels(self, step_features, step_has_errors, step_error_category_labels):
         N, d = step_features.shape
-        error_category_mask = torch.zeros(len(self._error_category_name_label_map))
+        # Create the error category mask: array of [0..6] with 1 at every index where there is a match for the error category  
+        num_error_category = max(self._error_category_label_name_map.keys()) + 1
+        error_category_mask = torch.zeros(N,num_error_category) 
         for error_category_label in step_error_category_labels:
             if error_category_label in self._error_category_label_name_map:
-                error_category_mask[error_category_label] = 1  
+                error_category_mask[:,error_category_label] = 1  
                 
         if self._config.task_name == const.ERROR_RECOGNITION:
             if step_has_errors:
                 step_labels = torch.ones(N, 1)
             else:
                 step_labels = torch.zeros(N, 1)
-            return step_features, step_labels
+            return step_features, step_labels, error_category_mask
         elif self._config.task_name == const.EARLY_ERROR_RECOGNITION:
             # Input only half of the step features and labels
             step_features = step_features[:N // 2, :]
+            error_category_mask = error_category_mask[:N // 2, :]
             if step_has_errors:
                 step_labels = torch.ones(N // 2, 1)
             else:
                 step_labels = torch.zeros(N // 2, 1)
-            return step_features, step_labels
+            return step_features, step_labels, error_category_mask
         elif self._config.task_name == const.ERROR_CATEGORY_RECOGNITION:
             # print(f"Error category: {self._config.error_category}")
             error_category_name = self._category_name_map[self._config.error_category]
@@ -224,7 +227,7 @@ class CaptainCookStepDataset(Dataset):
                 step_labels = torch.ones(N, 1)
             else:
                 step_labels = torch.zeros(N, 1)
-            return step_features, step_labels
+            return step_features, step_labels, error_category_mask
 
     def _build_modality_step_features_labels(self, recording_features, step_start_end_list):
         # Build step features by concatenating the features of the step from the list

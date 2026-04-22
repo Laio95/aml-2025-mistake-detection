@@ -187,7 +187,7 @@ def train_model_base(train_loader, val_loader, config, test_loader=None):
             num_batches = len(train_loader)
             train_losses = []
 
-            for batch_idx, (data, target) in enumerate(train_loader):
+            for batch_idx, (data, target, *category) in enumerate(train_loader):
                 data, target = data.to(device), target.to(device)
 
                 assert not torch.isnan(data).any(), "Data contains NaN values"
@@ -349,7 +349,7 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
             sigmoid_output = output.sigmoid()
             all_outputs.append(sigmoid_output.detach().cpu().numpy().reshape(-1))
             all_targets.append(target.detach().cpu().numpy().reshape(-1))
-            all_error_category.append(e_category)
+            all_error_category.append(e_category.detach().cpu().numpy())
 
             test_step_start_end_list.append((counter, counter + data.shape[0]))
             counter += data.shape[0]
@@ -360,6 +360,7 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     # Flatten lists
     all_outputs = np.concatenate(all_outputs)
     all_targets = np.concatenate(all_targets)
+    all_error_category = np.concatenate(all_error_category, axis=0)
     
 
     # Assert that none of the outputs are NaN
@@ -368,6 +369,8 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     # ------------------------- Sub-Step Level Metrics -------------------------
     all_sub_step_targets = all_targets.copy()
     all_sub_step_outputs = all_outputs.copy()
+    category_specific_sub_step_metrics = {}      
+    label_to_name = test_loader.iterable.dataset._error_category_label_name_map
 
     # Calculate metrics at the sub-step level
     pred_sub_step_labels = (all_sub_step_outputs > 0.5).astype(int)
@@ -387,6 +390,31 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
         const.PR_AUC: sub_step_pr_auc
     }
 
+    for label_idx in sorted(label_to_name.keys()):
+        mask = all_error_category[:, label_idx] == 1
+        category_name = label_to_name[label_idx] 
+        if np.any(mask):
+            cat_targets = all_targets[mask]
+            cat_outputs = all_outputs[mask]
+            cat_preds = (cat_outputs > 0.5).astype(int)
+            # Calculate metrics at the error_category sub-step level
+            #sub_step_precision = precision_score(cat_targets, cat_preds)
+            sub_step_recall = recall_score(cat_targets, cat_preds)
+            sub_step_f1 = f1_score(cat_targets, cat_preds)
+            sub_step_accuracy = accuracy_score(cat_targets, cat_preds)
+            #sub_step_auc = roc_auc_score(cat_targets, cat_outputs)
+            #sub_step_pr_auc = binary_auprc(torch.tensor(cat_preds), torch.tensor(cat_targets))
+            category_specific_sub_step_metrics[category_name] = {
+                #some metrics used for general case have no meaning in specific error metric: no FP since all targets have error
+                #const.PRECISION: sub_step_precision, 
+                const.RECALL: sub_step_recall,
+                const.F1: sub_step_f1,
+                const.ACCURACY: sub_step_accuracy,
+                #const.AUC: sub_step_auc,
+                #const.PR_AUC: sub_step_pr_auc
+            }
+        else:
+            category_specific_sub_step_metrics[category_name] = None
     # -------------------------- Step Level Metrics --------------------------
     all_step_targets = []
     all_step_outputs = []
@@ -453,6 +481,14 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     # Print step level metrics
     print("----------------------------------------------------------------")
     print(f'{phase} Sub Step Level Metrics: {sub_step_metrics}')
+    if category_specific_sub_step_metrics:
+        print(f"\n--- {phase} Detailed Error Category Metrics ---")
+    for cat_name, metrics in category_specific_sub_step_metrics.items():
+        if metrics is not None:
+            # Stampiamo il nome della categoria e il suo dizionario di metriche
+            print(f" > {cat_name}: {metrics}")
+        else:
+            print(f" > {cat_name}: No samples found in {phase}")
     print(f"{phase} Step Level Metrics: {step_metrics}")
     print("----------------------------------------------------------------")
 
