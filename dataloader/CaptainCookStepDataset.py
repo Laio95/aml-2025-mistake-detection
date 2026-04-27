@@ -248,7 +248,7 @@ class CaptainCookStepDataset(Dataset):
             step_error_category_labels
         )
 
-        return step_features, step_labels, step_error_category, step_error_category_labels
+        return step_features, step_labels, step_error_category
 
     def _get_video_features(self, recording_id, step_start_end_list):
         features_path = os.path.join(self._config.segment_features_directory, "video", self._backbone,

@@ -397,34 +397,24 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
             cat_targets = all_targets[mask]
             cat_outputs = all_outputs[mask]
             cat_preds = (cat_outputs > 0.5).astype(int)
-            # Calculate metrics at the error_category sub-step level
-            #sub_step_precision = precision_score(cat_targets, cat_preds)
             sub_step_recall = recall_score(cat_targets, cat_preds)
-            sub_step_f1 = f1_score(cat_targets, cat_preds)
-            sub_step_accuracy = accuracy_score(cat_targets, cat_preds)
-            #sub_step_auc = roc_auc_score(cat_targets, cat_outputs)
-            #sub_step_pr_auc = binary_auprc(torch.tensor(cat_preds), torch.tensor(cat_targets))
             category_specific_sub_step_metrics[category_name] = {
-                #some metrics used for general case have no meaning in specific error metric: no FP since all targets have error
-                #const.PRECISION: sub_step_precision, 
+                #some metrics used for general case have no meaning in specific error metric: no FP since all targets have error 
                 const.RECALL: sub_step_recall,
-                const.F1: sub_step_f1,
-                const.ACCURACY: sub_step_accuracy,
-                #const.AUC: sub_step_auc,
-                #const.PR_AUC: sub_step_pr_auc
             }
         else:
             category_specific_sub_step_metrics[category_name] = None
     # -------------------------- Step Level Metrics --------------------------
     all_step_targets = []
     all_step_outputs = []
+    all_step_error_category = []
 
     # threshold_outputs = all_outputs / max_probability
 
     for start, end in test_step_start_end_list:
         step_output = all_outputs[start:end]
         step_target = all_targets[start:end]
-
+        step_error_category = all_error_category[start:end]
         # sorted_step_output = np.sort(step_output)
         # # Top 50% of the predictions
         # threshold = np.percentile(sorted_step_output, 50)
@@ -446,11 +436,14 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
 
         mean_step_output = np.mean(step_output)
         step_target = 1 if np.mean(step_target) > 0.95 else 0
+        step_error_category = (np.sum(step_error_category, axis=0) > 0).astype(int)
 
         all_step_outputs.append(mean_step_output)
         all_step_targets.append(step_target)
+        all_step_error_category.append(step_error_category)
 
     all_step_outputs = np.array(all_step_outputs)
+    all_step_error_category = np.array(all_step_error_category)
 
     # # Scale the output to [0, 1]
     if step_normalization:
@@ -478,18 +471,48 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
         const.PR_AUC: pr_auc
     }
 
+    category_specific_step_metrics = {}
+
+    label_to_name = test_loader.iterable.dataset._error_category_label_name_map
+
+    for label_idx in sorted(label_to_name.keys()):
+        mask = all_step_error_category[:, label_idx] == 1
+        category_name = label_to_name[label_idx]
+
+        if np.any(mask):
+            cat_targets = all_step_targets[mask]
+            cat_outputs = all_step_outputs[mask]
+            cat_preds = (cat_outputs > threshold).astype(int)
+
+            step_recall = recall_score(cat_targets, cat_preds)
+
+            category_specific_step_metrics[category_name] = {
+                #some metrics used for general case have no meaning in specific error metric: no FP since all targets have error 
+                const.RECALL: step_recall,
+            }
+        else:
+            category_specific_step_metrics[category_name] = None
+
     # Print step level metrics
     print("----------------------------------------------------------------")
     print(f'{phase} Sub Step Level Metrics: {sub_step_metrics}')
     if category_specific_sub_step_metrics:
-        print(f"\n--- {phase} Detailed Error Category Metrics ---")
+        print(f"--- {phase} Detailed Error Category Metrics ---")
     for cat_name, metrics in category_specific_sub_step_metrics.items():
         if metrics is not None:
             # Stampiamo il nome della categoria e il suo dizionario di metriche
             print(f" > {cat_name}: {metrics}")
         else:
             print(f" > {cat_name}: No samples found in {phase}")
-    print(f"{phase} Step Level Metrics: {step_metrics}")
+    print(f"\n{phase} Step Level Metrics: {step_metrics}")
+    if category_specific_step_metrics:
+        print(f"--- {phase} Detailed Error Category Metrics ---")
+    for cat_name, metrics in category_specific_step_metrics.items():
+        if metrics is not None:
+            # Stampiamo il nome della categoria e il suo dizionario di metriche
+            print(f" > {cat_name}: {metrics}")
+        else:
+            print(f" > {cat_name}: No samples found in {phase}")
     print("----------------------------------------------------------------")
 
     return test_losses, sub_step_metrics, step_metrics
