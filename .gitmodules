@@ -1,6 +1,6 @@
 [submodule "annotations"]
 	path = annotations
 	url = https://github.com/CaptainCook4D/annotations
-[submodule "actionformer"]
-	path = actionformer
+[submodule "actionformer_release"]
+	path = actionformer_release
 	url = https://github.com/rohithpeddi/actionformer_release.git
