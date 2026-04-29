@@ -330,12 +330,12 @@ def get_target_and_score_by_error_category(list_step_target, list_step_score, li
     for col_idx, cat_name in label_to_category.items():
         one_versus_rest = False
         if one_versus_rest:
-            # when target = 0, the sample is keept for every category
-            # when target = 1, only the actual categories will use that sample. For all the others, the score is set to 0 (false negative)
+            # when target = 0, the sample is kept for every category
+            # when target = 1, only the actual categories will use that sample. For all the others, the target is set to 0
             result_target[cat_name] = ((list_step_target == 1) & (list_step_category[:, col_idx] == 1)).astype(int)
             result_score[cat_name] = list_step_score
         else:
-            # when target = 0, the sample is keept for every category
+            # when target = 0, the sample is kept for every category
             # when target = 1, only the actual categories will use that sample. For all the others, the sample is ignored
             mask = (list_step_target == 0) | (list_step_category[:, col_idx] == 1)
 
