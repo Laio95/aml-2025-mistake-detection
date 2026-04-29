@@ -1,4 +1,4 @@
-dataset_name: error_dataset
+dataset_name: captaincook_dataset
 train_split: ['training', 'validation']
 val_split: ['test']
 dataset: {
