@@ -322,7 +322,66 @@ def train_sub_step_test_step_dataset_base(config):
 
 
 # ----------------------- TEST BASE FILES -----------------------
+def get_target_and_score_by_error_category(list_step_target, list_step_score, list_step_category, label_to_category):
 
+    result_target = {}
+    result_score = {}
+
+    for col_idx, cat_name in label_to_category.items():
+        one_versus_rest = False
+        if one_versus_rest:
+            # when target = 0, the sample is keept for every category
+            # when target = 1, only the actual categories will use that sample. For all the others, the score is set to 0 (false negative)
+            result_target[cat_name] = ((list_step_target == 1) & (list_step_category[:, col_idx] == 1)).astype(int)
+            result_score[cat_name] = list_step_score
+        else:
+            # when target = 0, the sample is keept for every category
+            # when target = 1, only the actual categories will use that sample. For all the others, the sample is ignored
+            mask = (list_step_target == 0) | (list_step_category[:, col_idx] == 1)
+
+            result_target[cat_name] = list_step_target[mask]
+            result_score[cat_name] = list_step_score[mask]
+    
+    return (result_target,result_score)
+
+def compute_category_metrics(category_target, category_score, threshold=0.6):
+
+    rows = []
+    
+    # For each category (sorted by name)
+    for cat in sorted(category_target.keys()):
+        targets = category_target[cat]
+        scores  = category_score[cat]
+        
+        # Get the prediction based on the threshold
+        preds = (scores > threshold).astype(int)
+        support = int(targets.sum())
+
+        # if this category have zero support, skip the metrics
+        if support == 0:
+            row = {
+                "Category": cat,
+                const.PRECISION: float("nan"),
+                const.RECALL: float("nan"),
+                const.F1: float("nan"),
+                const.AUC: float("nan"),
+                const.SUPPORT: support
+            }
+            continue
+            
+        row = {
+                "Category": cat,
+                const.PRECISION: round(precision_score(targets, preds, zero_division=0) * 100, 2),
+                const.RECALL: round(recall_score(targets, preds, zero_division=0) * 100, 2),
+                const.F1: round(f1_score(targets, preds, zero_division=0) * 100, 2),
+                const.AUC: round(roc_auc_score(targets, scores) * 100, 2),
+                const.SUPPORT: support
+            }
+        rows.append(row)
+        
+    return rows
+    
+    
 
 def test_er_model(model, test_loader, criterion, device, phase, step_normalization=True, sub_step_normalization=True,
                   threshold=0.6):
@@ -462,6 +521,10 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     auc = roc_auc_score(all_step_targets, all_step_outputs)
     pr_auc = binary_auprc(torch.tensor(pred_step_labels), torch.tensor(all_step_targets))
 
+    # Calculate metrics at the step level, for each error category  
+    label_to_name = test_loader.iterable.dataset._error_category_label_name_map
+    category_metrics = compute_category_metrics(get_target_and_score_by_error_category(all_step_outputs,all_step_targets,all_step_error_category,label_to_name),threshold=threshold)
+
     step_metrics = {
         const.PRECISION: precision,
         const.RECALL: recall,
@@ -471,48 +534,13 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
         const.PR_AUC: pr_auc
     }
 
-    category_specific_step_metrics = {}
-
-    label_to_name = test_loader.iterable.dataset._error_category_label_name_map
-
-    for label_idx in sorted(label_to_name.keys()):
-        mask = all_step_error_category[:, label_idx] == 1
-        category_name = label_to_name[label_idx]
-
-        if np.any(mask):
-            cat_targets = all_step_targets[mask]
-            cat_outputs = all_step_outputs[mask]
-            cat_preds = (cat_outputs > threshold).astype(int)
-
-            step_recall = recall_score(cat_targets, cat_preds)
-
-            category_specific_step_metrics[category_name] = {
-                #some metrics used for general case have no meaning in specific error metric: no FP since all targets have error 
-                const.RECALL: step_recall,
-            }
-        else:
-            category_specific_step_metrics[category_name] = None
-
     # Print step level metrics
     print("----------------------------------------------------------------")
     print(f'{phase} Sub Step Level Metrics: {sub_step_metrics}')
-    if category_specific_sub_step_metrics:
-        print(f"--- {phase} Detailed Error Category Metrics ---")
-    for cat_name, metrics in category_specific_sub_step_metrics.items():
-        if metrics is not None:
-            # Stampiamo il nome della categoria e il suo dizionario di metriche
-            print(f" > {cat_name}: {metrics}")
-        else:
-            print(f" > {cat_name}: No samples found in {phase}")
-    print(f"\n{phase} Step Level Metrics: {step_metrics}")
-    if category_specific_step_metrics:
-        print(f"--- {phase} Detailed Error Category Metrics ---")
-    for cat_name, metrics in category_specific_step_metrics.items():
-        if metrics is not None:
-            # Stampiamo il nome della categoria e il suo dizionario di metriche
-            print(f" > {cat_name}: {metrics}")
-        else:
-            print(f" > {cat_name}: No samples found in {phase}")
+    print(f"{phase} Step Level Metrics: {step_metrics}")
+    print(f"{phase} Category Step Level Metrics:\n")
+    for row in category_metrics:
+        print(f"{row}")
     print("----------------------------------------------------------------")
 
     return test_losses, sub_step_metrics, step_metrics

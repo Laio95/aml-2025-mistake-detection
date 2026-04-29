@@ -12,6 +12,7 @@ class Constants:
     F1 = "f1"
     AUC = "auc"
     PR_AUC = "pr_auc"
+    SUPPORT = "support"
 
     STEP_METRICS = "step_metrics"
     SUB_STEP_METRICS = "sub_step_metrics"
