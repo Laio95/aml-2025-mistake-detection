@@ -371,10 +371,10 @@ def compute_category_metrics(category_target, category_score, threshold=0.6):
             
         row = {
                 "Category": cat,
-                const.PRECISION: round(precision_score(targets, preds, zero_division=0) * 100, 2),
-                const.RECALL: round(recall_score(targets, preds, zero_division=0) * 100, 2),
-                const.F1: round(f1_score(targets, preds, zero_division=0) * 100, 2),
-                const.AUC: round(roc_auc_score(targets, scores) * 100, 2),
+                const.PRECISION: round(precision_score(targets, preds, zero_division=0), 4),
+                const.RECALL: round(recall_score(targets, preds, zero_division=0), 4),
+                const.F1: round(f1_score(targets, preds, zero_division=0), 4),
+                const.AUC: round(roc_auc_score(targets, scores), 4),
                 const.SUPPORT: support
             }
         rows.append(row)
@@ -523,7 +523,7 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
 
     # Calculate metrics at the step level, for each error category  
     label_to_name = test_loader.iterable.dataset._error_category_label_name_map
-    category_metrics = compute_category_metrics(get_target_and_score_by_error_category(all_step_outputs,all_step_targets,all_step_error_category,label_to_name),threshold=threshold)
+    category_metrics = compute_category_metrics(*get_target_and_score_by_error_category(all_step_targets,all_step_outputs,all_step_error_category,label_to_name),threshold=threshold)
 
     step_metrics = {
         const.PRECISION: precision,
