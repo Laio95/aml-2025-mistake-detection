@@ -14,7 +14,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 # our code
 from actionformer_release.libs.core import load_config
-from actionformer_release.libs.datasets import captain_cook, make_dataset, make_data_loader
+# import our captain_cook.property
+import captain_cook
+
+from actionformer_release.libs.datasets import make_dataset, make_data_loader
 from actionformer_release.libs.modeling import make_meta_arch
 from actionformer_release.libs.utils import (train_one_epoch, valid_one_epoch, ANETdetection,
                                      save_checkpoint, make_optimizer, make_scheduler,

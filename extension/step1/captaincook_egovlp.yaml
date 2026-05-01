@@ -5,7 +5,7 @@ dataset: {
   backbone: egovlp,
   division_type: recordings,
   videos_type: 'all',
-  json_file: 'recording.json',
+  json_file: 'combined_recordings.json',
   feat_folder: '/content/drive/MyDrive/AML_Project/CaptainCook4D/features_egovlp_num_frames_16',
   file_prefix: ~,
   file_suffix: '_360p',
@@ -13,22 +13,25 @@ dataset: {
   num_classes: 353,
   input_dim: 256,
   feat_stride: 30,
-  num_frames: 90,
+  num_frames: 30,   # num_frames: 30 represents the temporal window size (1s at 30fps) used for alignment in ActionFormer, 
+                    # while the 16 frames in the extractor refer only to EgoVLP's internal subsampling rate.
   default_fps: 29.97,
   trunc_thresh: 0.3,
   crop_ratio: [0.9, 1.0],
   max_seq_len: 4096,
 }
 model: {
+  # CORRETTO — riscalato ×3 per feature da 1s (EgoVLP)
+  # [0,4]×3=[0,12], [2,8]×3=[6,24], ... → step da 6s a ore gestiti correttamente
   regression_range: [
-    [0, 4], 
-    [2, 8], 
-    [4, 16], 
-    [8, 32], 
-    [16, 64], 
-    [32, 128],
-    [64, 256],
-    [128, 10000]
+    [0, 12],    # 0-12s: microazioni
+    [6, 24],    # 6-24s: step brevi
+    [12, 48],   # 12-48s: step medi
+    [24, 96],   # 24-96s: step lunghi
+    [48, 192],  # 48-192s: step molto lunghi
+    [96, 384],  # 96-384s: fasi di ricetta
+    [192, 768],
+    [384, 10000]
   ],
   fpn_type: identity,
   backbone_arch: [2, 2, 7],
@@ -40,6 +43,7 @@ opt: {
   learning_rate: 0.0001,
   epochs: 16,
   weight_decay: 0.05,
+  warmup_epochs: 5,   # already like this by default
 }
 loader: {
   batch_size: 2,
