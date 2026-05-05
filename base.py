@@ -187,7 +187,7 @@ def train_model_base(train_loader, val_loader, config, test_loader=None):
             num_batches = len(train_loader)
             train_losses = []
 
-            for batch_idx, (data, target) in enumerate(train_loader):
+            for batch_idx, (data, target, *category) in enumerate(train_loader):
                 data, target = data.to(device), target.to(device)
 
                 assert not torch.isnan(data).any(), "Data contains NaN values"
@@ -322,13 +322,73 @@ def train_sub_step_test_step_dataset_base(config):
 
 
 # ----------------------- TEST BASE FILES -----------------------
+def get_target_and_score_by_error_category(list_step_target, list_step_score, list_step_category, label_to_category):
 
+    result_target = {}
+    result_score = {}
+
+    for col_idx, cat_name in label_to_category.items():
+        one_versus_rest = False
+        if one_versus_rest:
+            # when target = 0, the sample is kept for every category
+            # when target = 1, only the actual categories will use that sample. For all the others, the target is set to 0
+            result_target[cat_name] = ((list_step_target == 1) & (list_step_category[:, col_idx] == 1)).astype(int)
+            result_score[cat_name] = list_step_score
+        else:
+            # when target = 0, the sample is kept for every category
+            # when target = 1, only the actual categories will use that sample. For all the others, the sample is ignored
+            mask = (list_step_target == 0) | (list_step_category[:, col_idx] == 1)
+
+            result_target[cat_name] = list_step_target[mask]
+            result_score[cat_name] = list_step_score[mask]
+    
+    return (result_target,result_score)
+
+def compute_category_metrics(category_target, category_score, threshold=0.6):
+
+    rows = []
+    
+    # For each category (sorted by name)
+    for cat in sorted(category_target.keys()):
+        targets = category_target[cat]
+        scores  = category_score[cat]
+        
+        # Get the prediction based on the threshold
+        preds = (scores > threshold).astype(int)
+        support = int(targets.sum())
+
+        # if this category have zero support, skip the metrics
+        if support == 0:
+            row = {
+                "Category": cat,
+                const.PRECISION: float("nan"),
+                const.RECALL: float("nan"),
+                const.F1: float("nan"),
+                const.AUC: float("nan"),
+                const.SUPPORT: support
+            }
+            continue
+            
+        row = {
+                "Category": cat,
+                const.PRECISION: round(precision_score(targets, preds, zero_division=0), 4),
+                const.RECALL: round(recall_score(targets, preds, zero_division=0), 4),
+                const.F1: round(f1_score(targets, preds, zero_division=0), 4),
+                const.AUC: round(roc_auc_score(targets, scores), 4),
+                const.SUPPORT: support
+            }
+        rows.append(row)
+        
+    return rows
+    
+    
 
 def test_er_model(model, test_loader, criterion, device, phase, step_normalization=True, sub_step_normalization=True,
                   threshold=0.6):
     total_samples = 0
     all_targets = []
     all_outputs = []
+    all_error_category  = []
 
     test_loader = tqdm(test_loader)
     num_batches = len(test_loader)
@@ -338,16 +398,17 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     counter = 0
 
     with torch.no_grad():
-        for data, target in test_loader:
+        for data, target, e_category in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
             total_samples += data.shape[0]
             loss = criterion(output, target)
             test_losses.append(loss.item())
-
+            
             sigmoid_output = output.sigmoid()
             all_outputs.append(sigmoid_output.detach().cpu().numpy().reshape(-1))
             all_targets.append(target.detach().cpu().numpy().reshape(-1))
+            all_error_category.append(e_category.detach().cpu().numpy())
 
             test_step_start_end_list.append((counter, counter + data.shape[0]))
             counter += data.shape[0]
@@ -358,6 +419,8 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     # Flatten lists
     all_outputs = np.concatenate(all_outputs)
     all_targets = np.concatenate(all_targets)
+    all_error_category = np.concatenate(all_error_category, axis=0)
+    
 
     # Assert that none of the outputs are NaN
     assert not np.isnan(all_outputs).any(), "Outputs contain NaN values"
@@ -365,6 +428,8 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     # ------------------------- Sub-Step Level Metrics -------------------------
     all_sub_step_targets = all_targets.copy()
     all_sub_step_outputs = all_outputs.copy()
+    category_specific_sub_step_metrics = {}      
+    label_to_name = test_loader.iterable.dataset._error_category_label_name_map
 
     # Calculate metrics at the sub-step level
     pred_sub_step_labels = (all_sub_step_outputs > 0.5).astype(int)
@@ -384,16 +449,31 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
         const.PR_AUC: sub_step_pr_auc
     }
 
+    for label_idx in sorted(label_to_name.keys()):
+        mask = all_error_category[:, label_idx] == 1
+        category_name = label_to_name[label_idx] 
+        if np.any(mask):
+            cat_targets = all_targets[mask]
+            cat_outputs = all_outputs[mask]
+            cat_preds = (cat_outputs > 0.5).astype(int)
+            sub_step_recall = recall_score(cat_targets, cat_preds)
+            category_specific_sub_step_metrics[category_name] = {
+                #some metrics used for general case have no meaning in specific error metric: no FP since all targets have error 
+                const.RECALL: sub_step_recall,
+            }
+        else:
+            category_specific_sub_step_metrics[category_name] = None
     # -------------------------- Step Level Metrics --------------------------
     all_step_targets = []
     all_step_outputs = []
+    all_step_error_category = []
 
     # threshold_outputs = all_outputs / max_probability
 
     for start, end in test_step_start_end_list:
         step_output = all_outputs[start:end]
         step_target = all_targets[start:end]
-
+        step_error_category = all_error_category[start:end]
         # sorted_step_output = np.sort(step_output)
         # # Top 50% of the predictions
         # threshold = np.percentile(sorted_step_output, 50)
@@ -415,11 +495,14 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
 
         mean_step_output = np.mean(step_output)
         step_target = 1 if np.mean(step_target) > 0.95 else 0
+        step_error_category = (np.sum(step_error_category, axis=0) > 0).astype(int)
 
         all_step_outputs.append(mean_step_output)
         all_step_targets.append(step_target)
+        all_step_error_category.append(step_error_category)
 
     all_step_outputs = np.array(all_step_outputs)
+    all_step_error_category = np.array(all_step_error_category)
 
     # # Scale the output to [0, 1]
     if step_normalization:
@@ -438,6 +521,10 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     auc = roc_auc_score(all_step_targets, all_step_outputs)
     pr_auc = binary_auprc(torch.tensor(pred_step_labels), torch.tensor(all_step_targets))
 
+    # Calculate metrics at the step level, for each error category  
+    label_to_name = test_loader.iterable.dataset._error_category_label_name_map
+    category_metrics = compute_category_metrics(*get_target_and_score_by_error_category(all_step_targets,all_step_outputs,all_step_error_category,label_to_name),threshold=threshold)
+
     step_metrics = {
         const.PRECISION: precision,
         const.RECALL: recall,
@@ -451,6 +538,9 @@ def test_er_model(model, test_loader, criterion, device, phase, step_normalizati
     print("----------------------------------------------------------------")
     print(f'{phase} Sub Step Level Metrics: {sub_step_metrics}')
     print(f"{phase} Step Level Metrics: {step_metrics}")
+    print(f"{phase} Category Step Level Metrics:\n")
+    for row in category_metrics:
+        print(f"{row}")
     print("----------------------------------------------------------------")
 
     return test_losses, sub_step_metrics, step_metrics

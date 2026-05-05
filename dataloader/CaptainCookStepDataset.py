@@ -196,20 +196,28 @@ class CaptainCookStepDataset(Dataset):
 
     def _build_task_specific_features_labels(self, step_features, step_has_errors, step_error_category_labels):
         N, d = step_features.shape
+        # Create the error category mask: array of [0..6] with 1 at every index where there is a match for the error category  
+        num_error_category = max(self._error_category_label_name_map.keys()) + 1
+        error_category_mask = torch.zeros(N,num_error_category) 
+        for error_category_label in step_error_category_labels:
+            if error_category_label in self._error_category_label_name_map:
+                error_category_mask[:,error_category_label] = 1  
+                
         if self._config.task_name == const.ERROR_RECOGNITION:
             if step_has_errors:
                 step_labels = torch.ones(N, 1)
             else:
                 step_labels = torch.zeros(N, 1)
-            return step_features, step_labels
+            return step_features, step_labels, error_category_mask
         elif self._config.task_name == const.EARLY_ERROR_RECOGNITION:
             # Input only half of the step features and labels
             step_features = step_features[:N // 2, :]
+            error_category_mask = error_category_mask[:N // 2, :]
             if step_has_errors:
                 step_labels = torch.ones(N // 2, 1)
             else:
                 step_labels = torch.zeros(N // 2, 1)
-            return step_features, step_labels
+            return step_features, step_labels, error_category_mask
         elif self._config.task_name == const.ERROR_CATEGORY_RECOGNITION:
             # print(f"Error category: {self._config.error_category}")
             error_category_name = self._category_name_map[self._config.error_category]
@@ -219,7 +227,7 @@ class CaptainCookStepDataset(Dataset):
                 step_labels = torch.ones(N, 1)
             else:
                 step_labels = torch.zeros(N, 1)
-            return step_features, step_labels
+            return step_features, step_labels, error_category_mask
 
     def _build_modality_step_features_labels(self, recording_features, step_start_end_list):
         # Build step features by concatenating the features of the step from the list
@@ -234,13 +242,13 @@ class CaptainCookStepDataset(Dataset):
         step_features = np.concatenate(step_features, axis=0)
         step_features = torch.from_numpy(step_features).float()
 
-        step_features, step_labels = self._build_task_specific_features_labels(
+        step_features, step_labels, step_error_category = self._build_task_specific_features_labels(
             step_features,
             step_has_errors,
             step_error_category_labels
         )
 
-        return step_features, step_labels
+        return step_features, step_labels, step_error_category
 
     def _get_video_features(self, recording_id, step_start_end_list):
         features_path = os.path.join(self._config.segment_features_directory, "video", self._backbone,
@@ -248,9 +256,9 @@ class CaptainCookStepDataset(Dataset):
         features_data = np.load(features_path)
         recording_features = features_data['arr_0']
 
-        step_features, step_labels = self._build_modality_step_features_labels(recording_features, step_start_end_list)
+        step_features, step_labels, step_error_category_labels = self._build_modality_step_features_labels(recording_features, step_start_end_list)
         features_data.close()
-        return step_features, step_labels
+        return step_features, step_labels, step_error_category_labels
 
     def __getitem__(self, idx):
         recording_id = self._step_dict[idx][0]
@@ -260,20 +268,23 @@ class CaptainCookStepDataset(Dataset):
         step_labels = None
         
         assert self._backbone in [const.OMNIVORE, const.SLOWFAST, const.EGOVLP], "Only Omnivore, SlowFast and EgoVLP are supported with this codebase"
-        step_features, step_labels = self._get_video_features(recording_id, step_start_end_list)
+        step_features, step_labels , step_error_category_labels= self._get_video_features(recording_id, step_start_end_list)
 
         assert step_features is not None, f"Features not found for recording_id: {recording_id}"
         assert step_labels is not None, f"Labels not found for recording_id: {recording_id}"
+        assert step_error_category_labels is not None, f"Error category not found for recording_id: {recording_id}"
 
-        return step_features, step_labels
+        return step_features, step_labels, step_error_category_labels
 
 
 def collate_fn(batch):
     # batch is a list of tuples, and each tuple is (step_features, step_labels)
-    step_features, step_labels = zip(*batch)
+    # now it a triplet, added step_error_category to propagate the information of error category for better evaluation
+    step_features, step_labels, step_error_category_labels = zip(*batch)
 
     # Stack the step_features and step_labels
     step_features = torch.cat(step_features, dim=0)
     step_labels = torch.cat(step_labels, dim=0)
+    step_error_category_labels = torch.cat(step_error_category_labels, dim=0)
 
-    return step_features, step_labels
+    return step_features, step_labels, step_error_category_labels
