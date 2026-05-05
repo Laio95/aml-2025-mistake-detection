@@ -71,7 +71,7 @@ def _build_egovlp_model(egovlp_repo: str, ckpt_path: str, device: torch.device):
         video_params={
             "model": "SpaceTimeTransformer",
             "arch_config": "base_patch16_224",
-            "num_frames": 16,
+            "num_frames": 4,
             "pretrained": True,
             "time_init": "zeros",
         },
@@ -360,7 +360,7 @@ def get_video_transformation(name):
         crop_size = 224
         mean=[0.485, 0.456, 0.406]
         std=[0.229, 0.224, 0.225]
-        num_frames = 16
+        num_frames = 4
         video_transform = Compose(
             [
                 UniformTemporalSubsample(num_frames),
