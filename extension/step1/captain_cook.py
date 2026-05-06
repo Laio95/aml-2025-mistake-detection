@@ -41,7 +41,7 @@ class CaptainCookDataset(Dataset):
             feat_folder,      # path to the folder with flat .npz files
             json_file,        # path to the annotations JSON in ActivityNet format
             feat_stride,      # temporal stride in frames (e.g. 30 -> 1s at 29.97fps)
-            num_frames,       # frames per feature (e.g. 16)
+            num_frames,       # frames per feature (e.g. 30)
             default_fps,      # default fps (29.97 for CaptainCook4D)
             downsample_rate,  # feature downsampling rate (1 = none)
             max_seq_len,      # max sequence length for the model (e.g. 4096)
@@ -84,7 +84,7 @@ class CaptainCookDataset(Dataset):
 
         # ── Temporal parameters ───────────────────────────────────────────────
         self.feat_stride     = feat_stride      # stride in frames
-        self.num_frames      = num_frames       # frames per feature (16 for EgoVLP 1s)
+        self.num_frames      = num_frames       # ActionFormer temporal window (30 = 1s at 29.97fps), not EgoVLP internal sampling (4 frames)
         self.input_dim       = input_dim        # 256
         self.default_fps     = default_fps      # 29.97
         self.downsample_rate = downsample_rate  # 1
@@ -139,7 +139,7 @@ class CaptainCookDataset(Dataset):
             prefix       = ''
             suffix       = '_360p'
             ext          = '.npz'
-            -> .../features_egovlp_num_frames_16/1_7_360p.mp4_1s_1s.npz
+            -> .../features_egovlp_num_frames_4/1_7_360p.mp4_1s_1s.npz
         """
         filename = f"{self.file_prefix}{recording_id}{self.file_suffix}.mp4_1s_1s{self.file_ext}"
         return os.path.join(self.feat_folder, filename)
@@ -302,9 +302,9 @@ class CaptainCookDataset(Dataset):
         feat_stride = self.feat_stride * self.downsample_rate
 
         # feat_offset: half a clip in feature units, used to center segments.
-        # With num_frames=16 and feat_stride=30: offset = 0.5 * 16/30 ≈ 0.267 features
-        # Each feature represents a window of num_frames frames: its temporal center
-        # is half-window, not at the beginning.
+        # With num_frames=30 and feat_stride=30: offset = 0.5 * 30/30 = 0.5 feature units.
+        # num_frames here is the ActionFormer temporal window (30 frames = 1s at 29.97fps),
+        # NOT EgoVLP's internal sampling rate (4 frames per 1-second clip).
         feat_offset = 0.5 * self.num_frames / feat_stride
 
         # (T, C) -> (C, T): ActionFormer expects channels-first

@@ -6,15 +6,15 @@ dataset: {
   division_type: recordings,
   videos_type: 'all',
   json_file: 'combined_recordings.json',
-  feat_folder: '/content/drive/MyDrive/AML_Project/CaptainCook4D/features_egovlp_num_frames_16',
+  feat_folder: '/content/drive/MyDrive/AML_Project/CaptainCook4D/features_egovlp_num_frames_4',
   file_prefix: ~,
   file_suffix: '_360p',
   file_ext: .npz,
   num_classes: 353,
   input_dim: 256,
   feat_stride: 30,
-  num_frames: 30,   # num_frames: 30 represents the temporal window size (1s at 30fps) used for alignment in ActionFormer, 
-                    # while the 16 frames in the extractor refer only to EgoVLP's internal subsampling rate.
+  num_frames: 30,   # num_frames: 30 represents the temporal window size (1s at 30fps) used for alignment in ActionFormer,
+                    # while the 4 frames in the extractor refer only to EgoVLP's internal subsampling rate (num_frames_4 features).
   default_fps: 29.97,
   trunc_thresh: 0.3,
   crop_ratio: [0.9, 1.0],

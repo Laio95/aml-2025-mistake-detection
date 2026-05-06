@@ -15,8 +15,8 @@ Pipeline position:
                             │
                     {recording_id}_step_embeddings.npz  (one per video)
                             │
-                    Step 12: Task Verification (Transformer + LOO)
-                    Step 13: Hungarian Matching (task graph nodes)
+                    Extension Step 2: Task Verification (Transformer + LOO)
+                    Extension Step 3: Hungarian Matching (task graph nodes)
 
 Output format per recording_id ({recording_id}_step_embeddings.npz):
     step_embeddings  (N, 256) float32 — mean-pooled EgoVLP embedding per step
@@ -221,7 +221,7 @@ def build_step_embeddings(
         out_path = out_dir / f"{recording_id}_step_embeddings.npz"
         np.savez(
             out_path,
-            step_embeddings = embeddings,    # (N, 256) — input for steps 12/13
+            step_embeddings = embeddings,    # (N, 256) — input for Extension Steps 2/3
             step_intervals  = intervals,     # (N, 2)   — [t_start, t_end] seconds
             step_ids        = step_ids,      # (N,)     — ActionFormer label_id
             step_scores     = step_scores,   # (N,)     — confidence score
@@ -274,7 +274,7 @@ if __name__ == '__main__':
                         help='path to eval_results.pkl from eval.py --saveonly')
     parser.add_argument('--feat_folder', type=str, required=True,
                         help='directory with EgoVLP .npz feature files '
-                             '(e.g. .../features_egovlp_num_frames_16)')
+                             '(e.g. .../features_egovlp_num_frames_4)')
     parser.add_argument('--output_dir', type=str, required=True,
                         help='where to save {recording_id}_step_embeddings.npz files')
     parser.add_argument('--file_suffix', type=str, default='_360p',

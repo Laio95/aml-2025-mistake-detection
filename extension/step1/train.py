@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # our code
 from actionformer_release.libs.core import load_config
-# import our captain_cook.property
+# import our captain_cook dataset class
 import captain_cook
 
 from actionformer_release.libs.datasets import make_dataset, make_data_loader
@@ -186,13 +186,14 @@ if __name__ == '__main__':
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='path to a checkpoint (default: none)')
     # Added to CLI
-    parser.add_argument('--backbone', default='omnivore', type=str,
+    parser.add_argument('--backbone', default='egovlp', type=str,
                         choices=['omnivore', '3dresnet', 'videomae', 'slowfast', 'x3d', 'egovlp'])
     parser.add_argument('--division_type', default='recordings', type=str,
                         choices=['recordings', 'person', 'environment', 'recipes'])
     parser.add_argument('--feat_folder', default='features', type=str, )
 
-    # Default is 30 for all backbones
+    # ActionFormer temporal window in frames (30 = 1s at 29.97fps).
+    # NOT the EgoVLP internal sampling rate (4 frames per clip, set in segment_feature_extractor.py).
     parser.add_argument('--num_frames', default=30, type=int, )
     parser.add_argument('--stride', default=30, type=int, )
     args = parser.parse_args()
