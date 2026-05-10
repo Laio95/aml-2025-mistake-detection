@@ -107,7 +107,7 @@ def mean_pool_segment(features: np.ndarray,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_detections(pkl_path: str,
-                    score_threshold: float = 0.001
+                    score_threshold: float = 0.001,
                     ) -> dict[str, list[dict]]:
     """
     Load ActionFormer detections from eval_results.pkl.
@@ -128,26 +128,27 @@ def load_detections(pkl_path: str,
     with open(pkl_path, 'rb') as f:
         raw = pickle.load(f)
 
-    detections: dict[str, list[dict]] = {}
-    n_total, n_kept = 0, 0
-
+    # Group ALL proposals per video first (no filtering yet)
+    all_by_video: dict[str, list[dict]] = {}
     for vid, ts, te, lab, sc in zip(
         raw['video-id'], raw['t-start'], raw['t-end'],
         raw['label'],    raw['score']
     ):
-        n_total += 1
-        if float(sc) < score_threshold:
-            continue
-        n_kept += 1
-        detections.setdefault(str(vid), []).append({
+        all_by_video.setdefault(str(vid), []).append({
             't_start' : float(ts),
             't_end'   : float(te),
             'label_id': int(lab),
             'score'   : float(sc),
         })
 
-    for vid in detections:
-        detections[vid].sort(key=lambda d: d['t_start'])
+    detections: dict[str, list[dict]] = {}
+    n_total = sum(len(v) for v in all_by_video.values())
+    n_kept  = 0
+
+    for vid, dets in all_by_video.items():
+        kept = [d for d in dets if d['score'] >= score_threshold]
+        n_kept += len(kept)
+        detections[vid] = sorted(kept, key=lambda d: d['t_start'])
 
     print(f"Loaded {n_kept}/{n_total} detections (score >= {score_threshold}) "
           f"across {len(detections)} videos.")
@@ -175,7 +176,7 @@ def build_step_embeddings(
         output_dir:      where to save {recording_id}_step_embeddings.npz
         file_suffix:     suffix in feature filename (default: '_360p')
         file_ext:        feature file extension (default: '.npz')
-        score_threshold: discard detections with score below this value
+        score_threshold: keep detections with score >= this value
 
     Returns:
         Dict {recording_id: output_path | None}
