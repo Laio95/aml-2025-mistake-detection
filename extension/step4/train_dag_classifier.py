@@ -1,22 +1,25 @@
 """
-Extension Step 4 — LOO Training for DAGClassifier (DAGNN, faithful to Thost & Chen ICLR 2021)
-==============================================================================================
-Trains a DAGClassifier on task graph realizations using Leave-One-Out
-cross-validation (one fold per recipe), mirroring the protocol of B2.
+Extension Step 4 — Train/Val/Test Training for DAGClassifier (DAGNN)
+======================================================================
+Single-model training with a fixed train/val/test split at the recipe level.
 
-Key differences from B2 (extension/step2/loo_train.py):
-  - Dataset: TaskGraphDataset (PyG Data objects) instead of TaskVerificationDataset
-  - DataLoader: torch_geometric.loader.DataLoader (handles variable-size graphs)
-  - Model: DAGClassifier (DAGNN + readout on target nodes + MLP head)
-  - NodeFusionProjector is INSIDE the model — no separate projector variable needed
-  - forward() call passes raw text_feats / vis_feats / matched_mask / ptr
+The 24 recipes are split into train/val/test using a deterministic shuffle
+(seed=42 by default): 16 train / 4 val / 4 test.
+
+Split rationale:
+  - Split is at the RECIPE level — all recordings from the same recipe go to
+    the same partition, preventing any leakage between related videos.
+  - Val set drives LR scheduling and early stopping.
+  - Test set is evaluated ONCE at the end on the best-val-AUC checkpoint.
+
+The LOO version is archived in extension/step4/loo/train_dag_classifier_loo.py.
 """
 
 import argparse
 import csv
-import sys
+import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -37,6 +40,31 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Recipe-level split
+# ---------------------------------------------------------------------------
+
+def split_recipes(
+    activity_ids: List[int],
+    n_val:  int = 4,
+    n_test: int = 4,
+    seed:   int = 42,
+) -> Tuple[List[int], List[int], List[int]]:
+    """
+    Deterministic random split of recipe IDs into train / val / test.
+    Same seed always produces the same partition.
+
+    Returns:
+        (train_ids, val_ids, test_ids) — each a sorted list of activity_ids.
+    """
+    rng      = np.random.default_rng(seed)
+    shuffled = rng.permutation(sorted(activity_ids)).tolist()
+    test_ids  = sorted(shuffled[:n_test])
+    val_ids   = sorted(shuffled[n_test:n_test + n_val])
+    train_ids = sorted(shuffled[n_test + n_val:])
+    return train_ids, val_ids, test_ids
+
+
+# ---------------------------------------------------------------------------
 # Train / eval
 # ---------------------------------------------------------------------------
 
@@ -49,33 +77,23 @@ def train_epoch(
 ) -> float:
     model.train()
     total_loss = 0.0
-
     for batch in loader:
-        batch = batch.to(device)
-
+        batch  = batch.to(device)
         logits = model(
-            batch.text_feats,
-            batch.vis_feats,
-            batch.matched_mask,
-            batch.edge_index,
-            batch.batch,
-            batch.ptr,
-        )  # (B, 1)
-
+            batch.text_feats, batch.vis_feats, batch.matched_mask,
+            batch.edge_index, batch.batch, batch.ptr,
+        )
         loss = criterion(logits.squeeze(-1), batch.y.view(-1))
-
         optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-
         total_loss += loss.item()
-
     return total_loss / max(len(loader), 1)
 
 
 @torch.no_grad()
-def eval_fold(
+def eval_split(
     model:     DAGClassifier,
     loader:    DataLoader,
     criterion: nn.BCEWithLogitsLoss,
@@ -83,26 +101,18 @@ def eval_fold(
     device:    torch.device,
 ) -> Dict:
     model.eval()
-
     all_logits: List[torch.Tensor] = []
     all_labels: List[torch.Tensor] = []
     total_loss = 0.0
 
     for batch in loader:
-        batch = batch.to(device)
-
+        batch  = batch.to(device)
         logits = model(
-            batch.text_feats,
-            batch.vis_feats,
-            batch.matched_mask,
-            batch.edge_index,
-            batch.batch,
-            batch.ptr,
-        )  # (B, 1)
-
+            batch.text_feats, batch.vis_feats, batch.matched_mask,
+            batch.edge_index, batch.batch, batch.ptr,
+        )
         loss = criterion(logits.squeeze(-1), batch.y.view(-1))
         total_loss += loss.item()
-
         all_logits.append(logits.squeeze(-1).cpu())
         all_labels.append(batch.y.view(-1).cpu())
 
@@ -113,7 +123,7 @@ def eval_fold(
     try:
         auc = roc_auc_score(labels_np, logits_np)
     except ValueError:
-        auc = float("nan")  # only one class in this fold
+        auc = float("nan")
 
     return {
         "loss":     total_loss / max(len(loader), 1),
@@ -124,125 +134,15 @@ def eval_fold(
 
 
 # ---------------------------------------------------------------------------
-# LOO split utility
-# ---------------------------------------------------------------------------
-
-def make_loo_splits(activity_ids: List[int]):
-    """Yield (fold_idx, test_id, train_ids) for each fold."""
-    for fold_idx, test_id in enumerate(activity_ids, start=1):
-        train_ids = [aid for aid in activity_ids if aid != test_id]
-        yield fold_idx, test_id, train_ids
-
-
-# ---------------------------------------------------------------------------
-# Single fold
-# ---------------------------------------------------------------------------
-
-def train_fold(
-    fold_idx:           int,
-    test_activity_id:   int,
-    train_activity_ids: List[int],
-    args:               argparse.Namespace,
-    dataset_kwargs:     Dict,
-) -> Dict:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # --- Datasets (share the same pre-built cache) ---
-    train_ds = TaskGraphDataset(**dataset_kwargs, activity_ids=train_activity_ids)
-    test_ds  = TaskGraphDataset(**dataset_kwargs, activity_ids=[test_activity_id])
-
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers,
-    )
-    test_loader = DataLoader(
-        test_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers,
-    )
-
-    # --- Model (fresh per fold) ---
-    torch.manual_seed(args.seed)
-    model = DAGClassifier(
-        in_channels=256,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-    ).to(device)
-
-    # --- Loss: pos_weight from training split ---
-    n_pos = sum(s["label"] for s in train_ds.samples)
-    n_neg = len(train_ds.samples) - n_pos
-    pos_weight = torch.tensor([n_neg / max(n_pos, 1)], dtype=torch.float32, device=device)
-    criterion  = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    # --- Optimizer: all model parameters (includes projector, DAGNN, head) ---
-    optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=10, min_lr=1e-5,
-    )
-
-    # --- WandB ---
-    use_wandb = args.enable_wandb and WANDB_AVAILABLE
-    if use_wandb:
-        wandb.init(
-            project="gnn_task_verification_loo",
-            name=f"fold_{fold_idx}_recipe_{test_activity_id}",
-            reinit=True,
-        )
-
-    # --- Checkpoint path ---
-    ckpt_dir  = Path(args.output_dir) / "checkpoints"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"fold_{fold_idx}_recipe_{test_activity_id}_best.pt"
-
-    best_auc     = -1.0
-    best_metrics: Dict = {}
-
-    # --- Training loop ---
-    for epoch in range(1, args.num_epochs + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        metrics    = eval_fold(model, test_loader, criterion, args.threshold, device)
-
-        scheduler.step(metrics["auc"] if not np.isnan(metrics["auc"]) else 0.0)
-
-        if use_wandb:
-            wandb.log({
-                "epoch":         epoch,
-                "train_loss":    train_loss,
-                "test_loss":     metrics["loss"],
-                "test_auc":      metrics["auc"],
-                "test_f1":       metrics["f1"],
-                "test_accuracy": metrics["accuracy"],
-                "lr":            optimizer.param_groups[0]["lr"],
-            })
-
-        if not np.isnan(metrics["auc"]) and metrics["auc"] > best_auc:
-            best_auc     = metrics["auc"]
-            best_metrics = metrics.copy()
-            torch.save({
-                "model":   model.state_dict(),
-                "epoch":   epoch,
-                "metrics": metrics,
-            }, ckpt_path)
-
-    if use_wandb:
-        wandb.finish()
-
-    return {
-        "fold":        fold_idx,
-        "activity_id": test_activity_id,
-        **best_metrics,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="LOO training for DAGNN classifier (B4)")
+    parser = argparse.ArgumentParser(
+        description="Train/Val/Test training for DAGNN classifier (B4)"
+    )
 
-    # --- Paths ---
+    # Paths
     parser.add_argument("--annotations_path",    required=True)
     parser.add_argument("--step_embeddings_dir", required=True)
     parser.add_argument("--graphs_dir",          required=True)
@@ -251,23 +151,33 @@ def main():
     parser.add_argument("--cache_dir",           required=True)
     parser.add_argument("--output_dir",          required=True)
 
-    # --- Model ---
+    # Split
+    parser.add_argument("--n_val",  type=int, default=4,
+                        help="number of recipes held out for validation")
+    parser.add_argument("--n_test", type=int, default=4,
+                        help="number of recipes held out for test")
+    parser.add_argument("--seed",   type=int, default=42)
+
+    # Model
     parser.add_argument("--hidden_dim", type=int,   default=128)
     parser.add_argument("--num_layers", type=int,   default=2)
     parser.add_argument("--dropout",    type=float, default=0.5)
 
-    # --- Training ---
+    # Training
     parser.add_argument("--num_epochs",   type=int,   default=50)
     parser.add_argument("--lr",           type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--batch_size",   type=int,   default=4)
     parser.add_argument("--threshold",    type=float, default=0.5)
+    parser.add_argument("--patience",     type=int,   default=15,
+                        help="early stopping: max epochs without val AUC improvement")
     parser.add_argument("--num_workers",  type=int,   default=2)
-    parser.add_argument("--seed",         type=int,   default=42)
     parser.add_argument("--enable_wandb", action="store_true")
 
-    args = parser.parse_args()
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    args   = parser.parse_args()
+    out    = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset_kwargs = dict(
         annotations_path    = args.annotations_path,
@@ -278,65 +188,153 @@ def main():
         cache_dir           = args.cache_dir,
     )
 
-    # --- Pre-build cache once (reused by all folds) ---
-    print("Building pre-fusion cache (runs once, reused by all folds)...")
+    # --- Verify cache, derive split ---
+    print("Verifying pre-fusion cache...")
     full_ds = TaskGraphDataset(**dataset_kwargs)
     full_ds.prebuild_cache()
-    all_activity_ids = full_ds.get_activity_ids()
-    print(f"LOO: {len(all_activity_ids)} folds | {len(full_ds)} total videos\n")
+    all_ids = full_ds.get_activity_ids()
 
-    # --- LOO loop (with resume: skips folds whose checkpoint already exists) ---
-    all_results = []
-    ckpt_dir = Path(args.output_dir) / "checkpoints"
-    for fold_idx, test_id, train_ids in make_loo_splits(all_activity_ids):
-        ckpt_path = ckpt_dir / f"fold_{fold_idx}_recipe_{test_id}_best.pt"
-        if ckpt_path.exists():
-            saved  = torch.load(ckpt_path, weights_only=False)
-            result = {"fold": fold_idx, "activity_id": test_id, **saved["metrics"]}
-            all_results.append(result)
-            print(f"Fold {fold_idx:02d}/{len(all_activity_ids)} — SKIP (checkpoint exists)")
-            continue
+    train_ids, val_ids, test_ids = split_recipes(
+        all_ids, n_val=args.n_val, n_test=args.n_test, seed=args.seed,
+    )
+    print(f"\nSplit (seed={args.seed}): "
+          f"train={len(train_ids)}  val={len(val_ids)}  test={len(test_ids)} recipes")
+    print(f"  train : {train_ids}")
+    print(f"  val   : {val_ids}")
+    print(f"  test  : {test_ids}")
 
-        print(f"Fold {fold_idx:02d}/{len(all_activity_ids)} — test recipe {test_id}")
-        result = train_fold(fold_idx, test_id, train_ids, args, dataset_kwargs)
-        all_results.append(result)
+    # Save split for reproducibility
+    with open(out / "split_info.json", "w") as f:
+        json.dump({"seed": args.seed, "n_val": args.n_val, "n_test": args.n_test,
+                   "train": train_ids, "val": val_ids, "test": test_ids}, f, indent=2)
+
+    train_ds = TaskGraphDataset(**dataset_kwargs, activity_ids=train_ids)
+    val_ds   = TaskGraphDataset(**dataset_kwargs, activity_ids=val_ids)
+    test_ds  = TaskGraphDataset(**dataset_kwargs, activity_ids=test_ids)
+    print(f"Recordings — train: {len(train_ds)}  val: {len(val_ds)}  test: {len(test_ds)}\n")
+
+    train_loader = DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers,
+    )
+    val_loader = DataLoader(
+        val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+    )
+    test_loader = DataLoader(
+        test_ds,  batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+    )
+
+    # --- Model ---
+    torch.manual_seed(args.seed)
+    model = DAGClassifier(
+        in_channels=256,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+    ).to(device)
+
+    # pos_weight derived from train split only (no leakage from val/test)
+    n_pos = sum(s["label"] for s in train_ds.samples)
+    n_neg = len(train_ds.samples) - n_pos
+    pos_weight = torch.tensor([n_neg / max(n_pos, 1)], dtype=torch.float32, device=device)
+    criterion  = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=10, min_lr=1e-5)
+
+    # --- WandB ---
+    use_wandb = args.enable_wandb and WANDB_AVAILABLE
+    if use_wandb:
+        wandb.init(project="gnn_task_verification", name="train_val_test", reinit=True)
+
+    # --- Checkpoint ---
+    ckpt_dir  = out / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = ckpt_dir / "best.pt"
+
+    best_val_auc   = -1.0
+    no_improve_cnt = 0
+
+    # --- Training loop ---
+    for epoch in range(1, args.num_epochs + 1):
+        train_loss  = train_epoch(model, train_loader, optimizer, criterion, device)
+        val_metrics = eval_split(model, val_loader, criterion, args.threshold, device)
+
+        val_auc = val_metrics["auc"] if not np.isnan(val_metrics["auc"]) else 0.0
+        scheduler.step(val_auc)
+
+        if use_wandb:
+            wandb.log({
+                "epoch":        epoch,
+                "train_loss":   train_loss,
+                "val_loss":     val_metrics["loss"],
+                "val_auc":      val_metrics["auc"],
+                "val_f1":       val_metrics["f1"],
+                "val_accuracy": val_metrics["accuracy"],
+                "lr":           optimizer.param_groups[0]["lr"],
+            })
+
+        improved = val_auc > best_val_auc
+        if improved:
+            best_val_auc   = val_auc
+            no_improve_cnt = 0
+            torch.save({
+                "model":       model.state_dict(),
+                "epoch":       epoch,
+                "val_metrics": val_metrics,
+            }, ckpt_path)
+        else:
+            no_improve_cnt += 1
+
         print(
-            f"  AUC={result.get('auc', float('nan')):.4f}  "
-            f"F1={result.get('f1', float('nan')):.4f}  "
-            f"Acc={result.get('accuracy', float('nan')):.4f}"
+            f"Epoch {epoch:03d}/{args.num_epochs}  "
+            f"train_loss={train_loss:.4f}  "
+            f"val_auc={val_metrics['auc']:.4f}  "
+            f"val_f1={val_metrics['f1']:.4f}"
+            + ("  ← best" if improved else "")
         )
 
-    # --- Aggregate ---
-    valid    = [r for r in all_results if not np.isnan(r.get("auc", float("nan")))]
-    mean_auc = np.mean([r["auc"]      for r in valid])
-    std_auc  = np.std( [r["auc"]      for r in valid])
-    mean_f1  = np.mean([r["f1"]       for r in valid])
-    std_f1   = np.std( [r["f1"]       for r in valid])
-    mean_acc = np.mean([r["accuracy"] for r in valid])
-    std_acc  = np.std( [r["accuracy"] for r in valid])
+        if no_improve_cnt >= args.patience:
+            print(f"\nEarly stopping at epoch {epoch} "
+                  f"(no val AUC improvement for {args.patience} epochs).")
+            break
 
-    print(f"\n=== LOO Summary ({len(valid)} folds) ===")
-    print(f"AUC:      {mean_auc:.4f} ± {std_auc:.4f}")
-    print(f"F1:       {mean_f1:.4f} ± {std_f1:.4f}")
-    print(f"Accuracy: {mean_acc:.4f} ± {std_acc:.4f}")
+    # --- Final test evaluation on best checkpoint ---
+    print("\nLoading best checkpoint for test evaluation...")
+    saved = torch.load(ckpt_path, weights_only=False)
+    model.load_state_dict(saved["model"])
+    test_metrics = eval_split(model, test_loader, criterion, args.threshold, device)
 
-    # --- Save CSV ---
-    csv_path   = Path(args.output_dir) / "results.csv"
-    fieldnames = ["fold", "activity_id", "auc", "f1", "accuracy"]
+    if use_wandb:
+        wandb.log({
+            "test_auc":      test_metrics["auc"],
+            "test_f1":       test_metrics["f1"],
+            "test_accuracy": test_metrics["accuracy"],
+        })
+        wandb.finish()
+
+    print(f"\n=== Final Test Results ===")
+    print(f"AUC      : {test_metrics['auc']:.4f}")
+    print(f"F1       : {test_metrics['f1']:.4f}")
+    print(f"Accuracy : {test_metrics['accuracy']:.4f}")
+    print(f"(Best val AUC: {best_val_auc:.4f} at epoch {saved['epoch']})")
+
+    # --- Save results.csv ---
+    csv_path = out / "results.csv"
     with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=["split", "auc", "f1", "accuracy"])
         writer.writeheader()
-        for r in all_results:
-            writer.writerow({k: r.get(k, "") for k in fieldnames})
         writer.writerow({
-            "fold": "mean", "activity_id": "",
-            "auc": f"{mean_auc:.4f}", "f1": f"{mean_f1:.4f}", "accuracy": f"{mean_acc:.4f}",
+            "split":    "val",
+            "auc":      f"{saved['val_metrics']['auc']:.4f}",
+            "f1":       f"{saved['val_metrics']['f1']:.4f}",
+            "accuracy": f"{saved['val_metrics']['accuracy']:.4f}",
         })
         writer.writerow({
-            "fold": "std", "activity_id": "",
-            "auc": f"{std_auc:.4f}", "f1": f"{std_f1:.4f}", "accuracy": f"{std_acc:.4f}",
+            "split":    "test",
+            "auc":      f"{test_metrics['auc']:.4f}",
+            "f1":       f"{test_metrics['f1']:.4f}",
+            "accuracy": f"{test_metrics['accuracy']:.4f}",
         })
-
     print(f"Results saved to {csv_path}")
 
 
