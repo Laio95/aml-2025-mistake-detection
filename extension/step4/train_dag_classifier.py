@@ -26,7 +26,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
 
-from extension.step4.dataset_dag import TaskGraphDataset
+from extension.step3.dataset import TaskGraphDataset
 from extension.step4.dag_classifier import DAGClassifier
 
 try:

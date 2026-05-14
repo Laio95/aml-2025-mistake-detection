@@ -24,6 +24,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import global_max_pool
 
+from extension.step3.realization_builder import NodeFusionProjector
+
 
 # ---------------------------------------------------------------------------
 # Topological sort (Kahn's algorithm)
@@ -170,8 +172,8 @@ class DAGClassifier(nn.Module):
     """
     Graph-level binary classifier for task graph realizations.
 
-    The NodeFusionProjector (Linear 512→256) from B3 is included here so it is
-    optimised end-to-end with the GNN.
+    The NodeFusionProjector (Linear 512→256, from extension.step3.realization_builder)
+    is imported and optimised end-to-end with the GNN.
 
     Args:
         in_channels:  raw node feature dim after fusion (256 from EgoVLP, post-projector)
@@ -198,8 +200,8 @@ class DAGClassifier(nn.Module):
         self.num_layers = num_layers
         self.dropout    = dropout
 
-        # NodeFusionProjector from B3: fuses text (256) + visual (256) → 256
-        self.projector = nn.Linear(512, in_channels)
+        # NodeFusionProjector from extension.step3: fuses text (256) + visual (256) → 256
+        self.fusion = NodeFusionProjector(in_channels)
 
         # Input projection: 256 → hidden_dim  (produces h^0)
         self.input_proj = nn.Linear(in_channels, hidden_dim)
@@ -227,11 +229,9 @@ class DAGClassifier(nn.Module):
         batch:        torch.Tensor,  # (N_total,)       — node-to-graph assignment
         ptr:          torch.Tensor,  # (B+1,)           — cumulative node counts per graph
     ) -> torch.Tensor:               # (B, 1)           — one logit per graph
-        # --- NodeFusionProjector (B3) ---
-        # For matched nodes: project concat([text, vis]) → 256
-        # For unmatched nodes: project concat([text, zeros]) → 256 (same Linear, different input)
-        fused = torch.cat([text_feats, vis_feats], dim=-1)  # (N_total, 512)
-        x = F.relu(self.projector(fused))                   # (N_total, 256)
+        # --- NodeFusionProjector (from extension.step3) ---
+        # Matched nodes: concat([text, vis]) → 256; unmatched: concat([text, zeros]) → 256
+        x = F.relu(self.fusion(text_feats, vis_feats))      # (N_total, 256)
 
         # --- Input projection → h^0 ---
         x = F.relu(self.input_proj(x))  # (N_total, hidden_dim)

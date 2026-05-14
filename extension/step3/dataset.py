@@ -1,11 +1,11 @@
 """
-Extension Step 4 — Task Graph Dataset for GNN Classification
-=============================================================
+Extension Step 3 — Task Graph Dataset
+======================================
 Builds a PyTorch Geometric dataset where each item is a Data(x, edge_index, y)
 object representing the task graph realization of one video recording.
 
 Design decisions:
-  - build_realization() from B3 is expensive (text encoder + Hungarian matching),
+  - build_realization() is expensive (text encoder + Hungarian matching),
     so realizations are cached to disk as .pt files after the first build.
   - The NodeFusionProjector used during cache build has random (untrained) weights.
     This is intentional: the projector is trained end-to-end in the B4 training loop.
@@ -92,6 +92,7 @@ class TaskGraphDataset(Dataset):
         egovlp_ckpt:        path to egovlp.pth checkpoint
         cache_dir:          if provided, realizations are cached here as .pt files
         activity_ids:       if provided, filter to only these recipe IDs (used by LOO)
+        sim_threshold:      minimum cosine similarity for a Hungarian match to be accepted
     """
 
     def __init__(
@@ -103,11 +104,13 @@ class TaskGraphDataset(Dataset):
         egovlp_ckpt:         str,
         cache_dir:           Optional[str] = None,
         activity_ids:        Optional[List[int]] = None,
+        sim_threshold:       float = 0.0,
     ):
         super().__init__()
 
         self.step_embeddings_dir = Path(step_embeddings_dir)
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.sim_threshold = sim_threshold
 
         # Load all samples, then optionally filter by activity_id for LOO
         all_samples = load_samples(annotations_path)
@@ -190,7 +193,7 @@ class TaskGraphDataset(Dataset):
 
         # --- Hungarian matching ---
         if visual_embeddings is not None and visual_embeddings.shape[0] > 0:
-            matches = match_visual_to_graph(visual_embeddings, text_embeddings)
+            matches = match_visual_to_graph(visual_embeddings, text_embeddings, min_score=self.sim_threshold)
         else:
             matches = []
 
