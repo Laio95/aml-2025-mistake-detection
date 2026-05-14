@@ -1,15 +1,13 @@
 """
 Extension Step 4 — Train/Val/Test Training for DAGClassifier (DAGNN)
 ======================================================================
-Single-model training with a fixed train/val/test split at the recipe level.
-
-The 24 recipes are split into train/val/test using a deterministic shuffle
-(seed=42 by default): 16 train / 4 val / 4 test.
+Single-model training using the official CaptainCook4D train/val/test split
+from er_annotations/recordings_combined_splits.json.
 
 Split rationale:
-  - Split is at the RECIPE level — all recordings from the same recipe go to
-    the same partition, preventing any leakage between related videos.
-  - Val set drives LR scheduling and early stopping.
+  - Split is defined by the dataset authors at the recording level.
+  - All 24 recipes appear in each split (2 val + 2 test per recipe).
+  - Val set drives LR scheduling and checkpoint selection.
   - Test set is evaluated ONCE at the end on the best-val-AUC checkpoint.
 
 The LOO version is archived in extension/step4/loo/train_dag_classifier_loo.py.
@@ -32,36 +30,42 @@ from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
 from extension.step3.dataset import TaskGraphDataset
 from extension.step4.dag_classifier import DAGClassifier
 
+
+# ---------------------------------------------------------------------------
+# Split loading from official annotations
+# ---------------------------------------------------------------------------
+
+def load_split_from_json(splits_json: str) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Load train/val/test video IDs from combined_recordings.json (CaptainCook4D format).
+
+    Expected format:
+        {"database": {"1_19": {"subset": "Training", ...}, ...}}
+
+    Returns (train_ids, val_ids, test_ids) as sorted lists of recording ID strings.
+    """
+    with open(splits_json, "r") as f:
+        data = json.load(f)
+
+    db = data.get("database", data)  # handle both wrapped and bare formats
+
+    split: dict = {"train": [], "val": [], "test": []}
+    for vid, item in db.items():
+        raw = str(item.get("subset", "")).strip().lower()
+        if raw in {"training", "train"}:
+            split["train"].append(vid)
+        elif raw in {"validation", "val", "valid"}:
+            split["val"].append(vid)
+        elif raw in {"test", "testing"}:
+            split["test"].append(vid)
+
+    return sorted(split["train"]), sorted(split["val"]), sorted(split["test"])
+
 try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
-
-
-# ---------------------------------------------------------------------------
-# Recipe-level split
-# ---------------------------------------------------------------------------
-
-def split_recipes(
-    activity_ids: List[int],
-    n_val:  int = 4,
-    n_test: int = 4,
-    seed:   int = 42,
-) -> Tuple[List[int], List[int], List[int]]:
-    """
-    Deterministic random split of recipe IDs into train / val / test.
-    Same seed always produces the same partition.
-
-    Returns:
-        (train_ids, val_ids, test_ids) — each a sorted list of activity_ids.
-    """
-    rng      = np.random.default_rng(seed)
-    shuffled = rng.permutation(sorted(activity_ids)).tolist()
-    test_ids  = sorted(shuffled[:n_test])
-    val_ids   = sorted(shuffled[n_test:n_test + n_val])
-    train_ids = sorted(shuffled[n_test + n_val:])
-    return train_ids, val_ids, test_ids
 
 
 # ---------------------------------------------------------------------------
@@ -150,13 +154,11 @@ def main():
     parser.add_argument("--egovlp_ckpt",         required=True)
     parser.add_argument("--cache_dir",           required=True)
     parser.add_argument("--output_dir",          required=True)
+    parser.add_argument("--splits_json",         required=True,
+                        help="path to recordings_combined_splits.json")
 
-    # Split
-    parser.add_argument("--n_val",  type=int, default=4,
-                        help="number of recipes held out for validation")
-    parser.add_argument("--n_test", type=int, default=4,
-                        help="number of recipes held out for test")
-    parser.add_argument("--seed",   type=int, default=42)
+    # Split seed (for model weight init reproducibility only)
+    parser.add_argument("--seed", type=int, default=42)
 
     # Model
     parser.add_argument("--hidden_dim", type=int,   default=128)
@@ -169,8 +171,6 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--batch_size",   type=int,   default=4)
     parser.add_argument("--threshold",    type=float, default=0.5)
-    parser.add_argument("--patience",     type=int,   default=15,
-                        help="early stopping: max epochs without val AUC improvement")
     parser.add_argument("--num_workers",  type=int,   default=2)
     parser.add_argument("--enable_wandb", action="store_true")
 
@@ -188,30 +188,25 @@ def main():
         cache_dir           = args.cache_dir,
     )
 
-    # --- Verify cache, derive split ---
-    print("Verifying pre-fusion cache...")
-    full_ds = TaskGraphDataset(**dataset_kwargs)
-    full_ds.prebuild_cache()
-    all_ids = full_ds.get_activity_ids()
-
-    train_ids, val_ids, test_ids = split_recipes(
-        all_ids, n_val=args.n_val, n_test=args.n_test, seed=args.seed,
-    )
-    print(f"\nSplit (seed={args.seed}): "
-          f"train={len(train_ids)}  val={len(val_ids)}  test={len(test_ids)} recipes")
-    print(f"  train : {train_ids}")
-    print(f"  val   : {val_ids}")
-    print(f"  test  : {test_ids}")
+    # --- Load official split and build datasets ---
+    print("Loading official train/val/test split...")
+    train_ids, val_ids, test_ids = load_split_from_json(args.splits_json)
+    print(f"Split: train={len(train_ids)}  val={len(val_ids)}  test={len(test_ids)} recordings")
 
     # Save split for reproducibility
     with open(out / "split_info.json", "w") as f:
-        json.dump({"seed": args.seed, "n_val": args.n_val, "n_test": args.n_test,
+        json.dump({"splits_json": args.splits_json,
                    "train": train_ids, "val": val_ids, "test": test_ids}, f, indent=2)
 
-    train_ds = TaskGraphDataset(**dataset_kwargs, activity_ids=train_ids)
-    val_ds   = TaskGraphDataset(**dataset_kwargs, activity_ids=val_ids)
-    test_ds  = TaskGraphDataset(**dataset_kwargs, activity_ids=test_ids)
+    train_ds = TaskGraphDataset(**dataset_kwargs, video_ids=train_ids)
+    val_ds   = TaskGraphDataset(**dataset_kwargs, video_ids=val_ids)
+    test_ds  = TaskGraphDataset(**dataset_kwargs, video_ids=test_ids)
     print(f"Recordings — train: {len(train_ds)}  val: {len(val_ds)}  test: {len(test_ds)}\n")
+
+    # --- Verify / build cache (done once, shared across all splits) ---
+    print("Verifying pre-fusion cache...")
+    full_ds = TaskGraphDataset(**dataset_kwargs)
+    full_ds.prebuild_cache()
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers,
@@ -251,8 +246,7 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / "best.pt"
 
-    best_val_auc   = -1.0
-    no_improve_cnt = 0
+    best_val_auc = -1.0
 
     # --- Training loop ---
     for epoch in range(1, args.num_epochs + 1):
@@ -275,15 +269,12 @@ def main():
 
         improved = val_auc > best_val_auc
         if improved:
-            best_val_auc   = val_auc
-            no_improve_cnt = 0
+            best_val_auc = val_auc
             torch.save({
                 "model":       model.state_dict(),
                 "epoch":       epoch,
                 "val_metrics": val_metrics,
             }, ckpt_path)
-        else:
-            no_improve_cnt += 1
 
         print(
             f"Epoch {epoch:03d}/{args.num_epochs}  "
@@ -292,11 +283,6 @@ def main():
             f"val_f1={val_metrics['f1']:.4f}"
             + ("  ← best" if improved else "")
         )
-
-        if no_improve_cnt >= args.patience:
-            print(f"\nEarly stopping at epoch {epoch} "
-                  f"(no val AUC improvement for {args.patience} epochs).")
-            break
 
     # --- Final test evaluation on best checkpoint ---
     print("\nLoading best checkpoint for test evaluation...")

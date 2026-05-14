@@ -8,7 +8,7 @@ Architecture (faithful to Thost & Chen, ICLR 2021):
     text_feats + vis_feats  →  NodeFusionProjector  →  x (N, 256)
         → Linear(256 → hidden_dim) + ReLU                  [input projection, h^0]
         → DAGNNConv × L                                     [attention + GRU, h^1..h^L]
-        → concat(h^0..h^L) per node  →  MaxPool on targets [readout, Eq. 8]
+        → concat(h^0..h^L) per node  →  global MeanPool    [readout, all nodes equally]
         → Linear(hidden_dim*(L+1) → 1)                     [classifier]
         → BCEWithLogitsLoss
 
@@ -16,13 +16,13 @@ Key differences from a plain GCN / previous implementation:
   - Topological processing order: h_u^l is available when computing h_v^l (u predecessor of v)
   - Attention aggregation (Eq. 5-6): weighted sum with additive query-key scores
   - GRU combine (Eq. 7): message is the hidden state, past node feature is the input
-  - Readout only on target nodes (no successors), concat all layers (Eq. 8)
+  - Global MeanPool readout: all recipe steps contribute equally to the prediction
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import global_max_pool
+from torch_geometric.nn import global_mean_pool
 
 from extension.step3.realization_builder import NodeFusionProjector
 
@@ -58,19 +58,6 @@ def topological_sort(edge_index: torch.Tensor, num_nodes: int) -> list[int]:
     if len(order) != num_nodes:
         return list(range(num_nodes))
     return order
-
-
-def target_nodes(edge_index: torch.Tensor, num_nodes: int) -> list[int]:
-    """
-    Returns indices of nodes with no outgoing edges (no successors).
-    These are the 'target' nodes T in the DAGNN readout (Eq. 8): they have
-    digested information from the entire graph via the topological chain.
-    """
-    has_successor = set()
-    if edge_index.numel() > 0:
-        for u in edge_index[0].tolist():
-            has_successor.add(u)
-    return [v for v in range(num_nodes) if v not in has_successor]
 
 
 # ---------------------------------------------------------------------------
@@ -244,20 +231,14 @@ class DAGClassifier(nn.Module):
             x = self._dagnn_batched(conv, x, edge_index, batch, ptr)
             layer_feats.append(x)  # h^1, h^2, ...
 
-        # --- Readout (Eq. 8): concat all layers, MaxPool over target nodes ---
-        # Concat h^0..h^L per node → (N_total, hidden_dim*(L+1))
-        node_repr = torch.cat(layer_feats, dim=-1)  # (N_total, readout_dim)
-
-        # MaxPool over target nodes only (per graph)
-        graph_emb = self._target_maxpool(node_repr, edge_index, batch, ptr)  # (B, readout_dim)
+        # --- Readout: concat all layers, global MeanPool over all nodes ---
+        # All recipe steps contribute equally — no bias towards final/source nodes.
+        node_repr = torch.cat(layer_feats, dim=-1)          # (N_total, readout_dim)
+        graph_emb = global_mean_pool(node_repr, batch)       # (B, readout_dim)
 
         # --- Classifier ---
         graph_emb = F.dropout(graph_emb, p=self.dropout, training=self.training)
         return self.head(graph_emb)  # (B, 1)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     def _dagnn_batched(
         self,
@@ -299,41 +280,4 @@ class DAGClassifier(nn.Module):
 
         return torch.cat(out_parts, dim=0)  # (N_total, hidden_dim)
 
-    def _target_maxpool(
-        self,
-        node_repr:  torch.Tensor,  # (N_total, D)
-        edge_index: torch.Tensor,  # (2, E_total)
-        batch:      torch.Tensor,  # (N_total,)
-        ptr:        torch.Tensor,  # (B+1,)
-    ) -> torch.Tensor:             # (B, D)
-        """
-        For each graph, identify its target nodes (no outgoing edges) and
-        MaxPool their representations.  Falls back to global MaxPool if all
-        nodes happen to have successors (degenerate case).
-        """
-        B = ptr.size(0) - 1
-        D = node_repr.size(1)
-        graph_embs: list[torch.Tensor] = []
 
-        for g in range(B):
-            lo = ptr[g].item()
-            hi = ptr[g + 1].item()
-            N_g = hi - lo
-
-            if edge_index.numel() > 0:
-                src, dst = edge_index[0], edge_index[1]
-                mask = (src >= lo) & (src < hi)
-                local_src = (src[mask] - lo).tolist()
-            else:
-                local_src = []
-
-            has_successor = set(local_src)
-            tgt = [v for v in range(N_g) if v not in has_successor]
-
-            if not tgt:  # fallback: all nodes
-                tgt = list(range(N_g))
-
-            tgt_repr = node_repr[lo + torch.tensor(tgt, device=node_repr.device)]  # (|T|, D)
-            graph_embs.append(tgt_repr.max(dim=0).values)  # (D,)
-
-        return torch.stack(graph_embs, dim=0)  # (B, D)

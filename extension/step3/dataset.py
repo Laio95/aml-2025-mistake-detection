@@ -91,8 +91,11 @@ class TaskGraphDataset(Dataset):
         egovlp_repo:        path to showlab/EgoVLP clone (for text encoder)
         egovlp_ckpt:        path to egovlp.pth checkpoint
         cache_dir:          if provided, realizations are cached here as .pt files
-        activity_ids:       if provided, filter to only these recipe IDs (used by LOO)
+        video_ids:          if provided, filter to exactly these recording IDs (used by train/val/test split)
+        activity_ids:       if provided, filter to only these recipe IDs (used by LOO archive)
         sim_threshold:      minimum cosine similarity for a Hungarian match to be accepted
+
+    Note: video_ids takes precedence over activity_ids if both are provided.
     """
 
     def __init__(
@@ -103,6 +106,7 @@ class TaskGraphDataset(Dataset):
         egovlp_repo:         str,
         egovlp_ckpt:         str,
         cache_dir:           Optional[str] = None,
+        video_ids:           Optional[List[str]] = None,
         activity_ids:        Optional[List[int]] = None,
         sim_threshold:       float = 0.0,
     ):
@@ -112,9 +116,11 @@ class TaskGraphDataset(Dataset):
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.sim_threshold = sim_threshold
 
-        # Load all samples, then optionally filter by activity_id for LOO
         all_samples = load_samples(annotations_path)
-        if activity_ids is not None:
+        if video_ids is not None:
+            keep = set(video_ids)
+            all_samples = [s for s in all_samples if s["recording_id"] in keep]
+        elif activity_ids is not None:
             all_samples = [s for s in all_samples if s["activity_id"] in activity_ids]
         self.samples = all_samples
 
