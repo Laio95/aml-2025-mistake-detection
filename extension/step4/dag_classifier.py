@@ -4,15 +4,20 @@ Extension Step 4 — DAGNN Classifier for Task Graph Realization
 Classifies whether a task graph realization (built by B3) represents a correct
 or incorrect recipe execution.
 
-Architecture (faithful to Thost & Chen, ICLR 2021):
-    text_feats + vis_feats  →  NodeFusionProjector  →  x (N, 256)
-        → Linear(256 → hidden_dim) + ReLU                  [input projection, h^0]
-        → DAGNNConv × L                                     [attention + GRU, h^1..h^L]
-        → concat(h^0..h^L) per node  →  global MeanPool    [readout, all nodes equally]
-        → Linear(hidden_dim*(L+1) → 1)                     [classifier]
+Architecture:
+    text_feats + vis_feats  →  DifferenceFusionProjector  →  x (N, 256)
+        → Linear(256 → hidden_dim) + ReLU                     [input projection, h^0]
+        → DAGNNConv × L                                        [attention + GRU, h^1..h^L]
+        → concat(h^0..h^L) per node  →  global MeanPool       [readout, all nodes equally]
+        → Linear(hidden_dim*(L+1) → 1)                        [classifier]
         → BCEWithLogitsLoss
 
-Key differences from a plain GCN / previous implementation:
+DifferenceFusionProjector: proj(t - v) → Linear(256 → 256)
+  Semantic: in EgoVLP joint space, (t - v) is the gap between expected (t) and observed (v).
+  Correct execution: t ≈ v → t - v ≈ 0; Error: t - v has a characteristic direction.
+  Unmatched nodes: vis_feats = 0 → t - 0 = t (text features preserved as projector input).
+
+Key differences from a plain GCN:
   - Topological processing order: h_u^l is available when computing h_v^l (u predecessor of v)
   - Attention aggregation (Eq. 5-6): weighted sum with additive query-key scores
   - GRU combine (Eq. 7): message is the hidden state, past node feature is the input
@@ -24,7 +29,46 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool
 
-from extension.step3.realization_builder import NodeFusionProjector
+
+# ---------------------------------------------------------------------------
+# Fusion projectors
+# ---------------------------------------------------------------------------
+
+# ── v1 (concat) — kept for reference; used by build_realization() in step3 ──
+# class NodeFusionProjector(nn.Module):
+#     """concat([t, v]) → Linear(512→256). ~131K params — overfits on small LOO."""
+#     def __init__(self, feat_dim: int = 256):
+#         super().__init__()
+#         self.proj = nn.Linear(feat_dim * 2, feat_dim)
+#     def forward(self, text_feats, vis_feats):
+#         return self.proj(torch.cat([text_feats, vis_feats], dim=-1))
+
+class DifferenceFusionProjector(nn.Module):
+    """
+    Learnable projection of (t - v): expected text minus observed visual.
+
+    For matched nodes: proj(t - v) encodes the deviation from expected execution.
+      Correct: t ≈ v → t - v ≈ 0.  Error: t - v points in a characteristic direction.
+    For unmatched nodes: vis_feats = 0 → proj(t - 0) = proj(t), preserving text signal.
+
+    This is a constrained form of the concat projector: both share the same weight
+    matrix W (antisymmetric constraint W_t = W_v = W), which is semantically motivated
+    because t and v live in the same EgoVLP joint space.
+
+    Input:  text_feats (N, 256), vis_feats (N, 256) — L2-normalized, from cache
+    Output: (N, 256) — same dimension as input EgoVLP embeddings
+    """
+
+    def __init__(self, feat_dim: int = 256):
+        super().__init__()
+        self.proj = nn.Linear(feat_dim, feat_dim)
+
+    def forward(
+        self,
+        text_feats: torch.Tensor,  # (N, 256)
+        vis_feats:  torch.Tensor,  # (N, 256) — zeros for unmatched nodes
+    ) -> torch.Tensor:             # (N, 256)
+        return self.proj(text_feats - vis_feats)
 
 
 # ---------------------------------------------------------------------------
@@ -159,27 +203,24 @@ class DAGClassifier(nn.Module):
     """
     Graph-level binary classifier for task graph realizations.
 
-    The NodeFusionProjector (Linear 512→256, from extension.step3.realization_builder)
-    is imported and optimised end-to-end with the GNN.
+    Uses DifferenceFusionProjector: proj(t - v) → Linear(256→256), then DAGNN.
+    Default hidden_dim=32, num_layers=1 targets ~80K params for small LOO dataset.
 
     Args:
-        in_channels:  raw node feature dim after fusion (256 from EgoVLP, post-projector)
-        hidden_dim:   hidden dim for all DAGNN layers (default 128)
-        num_layers:   number of DAGNNConv layers (default 2)
+        in_channels:  EgoVLP feature dim (256)
+        hidden_dim:   hidden dim for all DAGNN layers (default 32)
+        num_layers:   number of DAGNNConv layers (default 1)
         dropout:      dropout before the classifier head (default 0.5)
 
     Forward signature (compatible with PyG DataLoader batching):
         logits = model(text_feats, vis_feats, matched_mask, edge_index, batch, ptr)
-
-    where `ptr` is the cumulative node-count array produced by DataLoader (used to
-    extract per-graph edge_index slices for topological sort).
     """
 
     def __init__(
         self,
-        in_channels: int  = 256,
-        hidden_dim:  int  = 128,
-        num_layers:  int  = 2,
+        in_channels: int   = 256,
+        hidden_dim:  int   = 32,
+        num_layers:  int   = 1,
         dropout:     float = 0.5,
     ):
         super().__init__()
@@ -187,8 +228,8 @@ class DAGClassifier(nn.Module):
         self.num_layers = num_layers
         self.dropout    = dropout
 
-        # NodeFusionProjector from extension.step3: fuses text (256) + visual (256) → 256
-        self.fusion = NodeFusionProjector(in_channels)
+        # DifferenceFusionProjector: proj(t - v) → Linear(256→256)
+        self.fusion = DifferenceFusionProjector(in_channels)
 
         # Input projection: 256 → hidden_dim  (produces h^0)
         self.input_proj = nn.Linear(in_channels, hidden_dim)

@@ -35,7 +35,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
 
-from extension.step3.dataset import TaskGraphDataset, load_samples
+from extension.step4.dataset import TaskGraphDataset, load_samples
 from extension.step4.dag_classifier import DAGClassifier
 
 try:
@@ -467,8 +467,8 @@ def main():
 
     # Model + training
     parser.add_argument("--seed",          type=int,   default=42)
-    parser.add_argument("--hidden_dim",    type=int,   default=128)
-    parser.add_argument("--num_layers",    type=int,   default=2)
+    parser.add_argument("--hidden_dim",    type=int,   default=32)
+    parser.add_argument("--num_layers",    type=int,   default=1)
     parser.add_argument("--dropout",       type=float, default=0.5)
     parser.add_argument("--num_epochs",    type=int,   default=50)
     parser.add_argument("--lr",            type=float, default=1e-3)
