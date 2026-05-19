@@ -56,18 +56,18 @@ class DifferenceFusionProjector(nn.Module):
     because t and v live in the same EgoVLP joint space.
 
     Input:  text_feats (N, 256), vis_feats (N, 256) — L2-normalized, from cache
-    Output: (N, 256) — same dimension as input EgoVLP embeddings
+    Output: (N, out_dim) — projected into the DAGNN hidden space directly
     """
 
-    def __init__(self, feat_dim: int = 256):
+    def __init__(self, feat_dim: int = 256, out_dim: int = 256):
         super().__init__()
-        self.proj = nn.Linear(feat_dim, feat_dim)
+        self.proj = nn.Linear(feat_dim, out_dim)
 
     def forward(
         self,
         text_feats: torch.Tensor,  # (N, 256)
         vis_feats:  torch.Tensor,  # (N, 256) — zeros for unmatched nodes
-    ) -> torch.Tensor:             # (N, 256)
+    ) -> torch.Tensor:             # (N, out_dim)
         return self.proj(text_feats - vis_feats)
 
 
@@ -203,8 +203,9 @@ class DAGClassifier(nn.Module):
     """
     Graph-level binary classifier for task graph realizations.
 
-    Uses DifferenceFusionProjector: proj(t - v) → Linear(256→256), then DAGNN.
-    Default hidden_dim=32, num_layers=1 targets ~80K params for small LOO dataset.
+    Uses DifferenceFusionProjector: proj(t - v) → Linear(256→hidden_dim), then DAGNN.
+    The projector maps directly into the DAGNN hidden space — no separate input_proj.
+    Default hidden_dim=32, num_layers=1 targets ~11K params for small LOO dataset.
 
     Args:
         in_channels:  EgoVLP feature dim (256)
@@ -228,11 +229,9 @@ class DAGClassifier(nn.Module):
         self.num_layers = num_layers
         self.dropout    = dropout
 
-        # DifferenceFusionProjector: proj(t - v) → Linear(256→256)
-        self.fusion = DifferenceFusionProjector(in_channels)
-
-        # Input projection: 256 → hidden_dim  (produces h^0)
-        self.input_proj = nn.Linear(in_channels, hidden_dim)
+        # DifferenceFusionProjector: proj(t - v) → Linear(256→hidden_dim)
+        # Maps directly into DAGNN space — no separate input_proj needed.
+        self.fusion = DifferenceFusionProjector(in_channels, hidden_dim)
 
         # L DAGNN layers, all hidden_dim → hidden_dim
         self.convs = nn.ModuleList(
@@ -257,12 +256,9 @@ class DAGClassifier(nn.Module):
         batch:        torch.Tensor,  # (N_total,)       — node-to-graph assignment
         ptr:          torch.Tensor,  # (B+1,)           — cumulative node counts per graph
     ) -> torch.Tensor:               # (B, 1)           — one logit per graph
-        # --- NodeFusionProjector (from extension.step3) ---
-        # Matched nodes: concat([text, vis]) → 256; unmatched: concat([text, zeros]) → 256
-        x = F.relu(self.fusion(text_feats, vis_feats))      # (N_total, 256)
-
-        # --- Input projection → h^0 ---
-        x = F.relu(self.input_proj(x))  # (N_total, hidden_dim)
+        # --- Fusion → h^0: proj(t - v) → hidden_dim ---
+        # Matched: proj(t - v) encodes deviation from expected. Unmatched: proj(t - 0) = proj(t).
+        x = F.relu(self.fusion(text_feats, vis_feats))      # (N_total, hidden_dim)
 
         # --- DAGNN layers with multi-layer readout ---
         # We collect the node features after each layer (including h^0) for the readout.
