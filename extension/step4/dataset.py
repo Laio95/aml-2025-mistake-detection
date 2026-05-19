@@ -1,5 +1,5 @@
 """
-Extension Step 3 — Task Graph Dataset
+Extension Step 4 — Task Graph Dataset
 ======================================
 Builds a PyTorch Geometric dataset where each item is a Data(x, edge_index, y)
 object representing the task graph realization of one video recording.
@@ -7,12 +7,10 @@ object representing the task graph realization of one video recording.
 Design decisions:
   - build_realization() is expensive (text encoder + Hungarian matching),
     so realizations are cached to disk as .pt files after the first build.
-  - The NodeFusionProjector used during cache build has random (untrained) weights.
-    This is intentional: the projector is trained end-to-end in the B4 training loop.
-    Re-building the cache at every epoch would be too slow; instead, B4 freezes the
-    projector during cache build and trains it jointly with the GNN.
-  - The dataset API mirrors B2 (TaskVerificationDataset): the same load_samples()
-    logic is used to derive video-level binary labels from complete_step_annotations.json.
+  - The cache stores text_feats and vis_feats separately (pre-fusion).
+    The DifferenceFusionProjector is applied in DAGClassifier.forward(),
+    so its parameters are optimised end-to-end with the GNN.
+  - Label rule: label=1 if ANY step in the recording has an error (same as B2).
 """
 
 import json
@@ -53,7 +51,6 @@ def load_samples(annotations_path: str) -> List[Dict]:
     samples = []
     for recording_id, info in annotations.items():
         activity_id = info["activity_id"]
-        # any() over all steps: if at least one step has an error → label=1
         label = int(any(step["has_errors"] for step in info["steps"]))
         samples.append({
             "recording_id": recording_id,
@@ -80,9 +77,9 @@ class TaskGraphDataset(Dataset):
         data.recording_id (stored as metadata for LOO bookkeeping)
         data.activity_id  (stored as metadata for LOO bookkeeping)
 
-    NOTE: The NodeFusionProjector is NOT applied here. It is applied in the training
-    loop, where its parameters are jointly optimized with the GNN. This ensures the
-    cache remains valid across all training epochs and folds.
+    The DifferenceFusionProjector is NOT applied here. It runs in DAGClassifier.forward()
+    so its parameters are jointly optimised with the GNN. The cache is therefore invariant
+    across all training configurations — no rebuild needed when changing the projector.
 
     Args:
         annotations_path:   path to complete_step_annotations.json
@@ -91,8 +88,8 @@ class TaskGraphDataset(Dataset):
         egovlp_repo:        path to showlab/EgoVLP clone (for text encoder)
         egovlp_ckpt:        path to egovlp.pth checkpoint
         cache_dir:          if provided, realizations are cached here as .pt files
-        video_ids:          if provided, filter to exactly these recording IDs (used by train/val/test split)
-        activity_ids:       if provided, filter to only these recipe IDs (used by LOO archive)
+        video_ids:          if provided, filter to exactly these recording IDs
+        activity_ids:       if provided, filter to only these recipe IDs (LOO)
         sim_threshold:      minimum cosine similarity for a Hungarian match to be accepted
 
     Note: video_ids takes precedence over activity_ids if both are provided.
@@ -124,16 +121,11 @@ class TaskGraphDataset(Dataset):
             all_samples = [s for s in all_samples if s["activity_id"] in activity_ids]
         self.samples = all_samples
 
-        # Load all 24 task graphs keyed by activity_id
         self.task_graphs: Dict[int, TaskGraph] = load_all_task_graphs(graphs_dir, annotations_path)
 
-        # Text encoder — loaded lazily, shared across all samples
         self._encoder: Optional[EgoVLPTextEncoder] = None
         self._egovlp_repo = egovlp_repo
         self._egovlp_ckpt = egovlp_ckpt
-
-        # Pre-compute text embeddings per recipe (N_nodes, 256) — one per activity_id
-        # Computed lazily and cached in memory
         self._text_embeddings_cache: Dict[int, torch.Tensor] = {}
 
         if self.cache_dir:
@@ -144,7 +136,6 @@ class TaskGraphDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _get_encoder(self) -> EgoVLPTextEncoder:
-        """Lazy-load EgoVLP text encoder (expensive, done only once per process)."""
         if self._encoder is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self._encoder = EgoVLPTextEncoder(
@@ -155,20 +146,14 @@ class TaskGraphDataset(Dataset):
         return self._encoder
 
     def _get_text_embeddings(self, activity_id: int) -> torch.Tensor:
-        """
-        Return text embeddings for all nodes of a recipe.
-        Result is cached in memory (computed once per unique activity_id).
-        """
         if activity_id not in self._text_embeddings_cache:
             graph = self.task_graphs[activity_id]
             encoder = self._get_encoder()
-            texts = graph.nodes  # List[str], already 0-indexed
-            embeddings = encoder.encode(texts)                        # (N_nodes, 256)
+            embeddings = encoder.encode(graph.nodes)  # (N_nodes, 256)
             self._text_embeddings_cache[activity_id] = embeddings
         return self._text_embeddings_cache[activity_id]
 
     def _load_visual_embeddings(self, recording_id: str) -> Optional[torch.Tensor]:
-        """Load step embeddings from .npz file produced by B1."""
         path = self.step_embeddings_dir / f"{recording_id}_step_embeddings.npz"
         if not path.exists():
             return None
@@ -185,25 +170,20 @@ class TaskGraphDataset(Dataset):
           3. Run Hungarian matching (visual ↔ textual)
           4. Store text_feats and vis_feats separately — NO projector applied here
           5. Pack into Data(text_feats, vis_feats, matched_mask, edge_index, y)
-
-        The NodeFusionProjector is applied in the training loop so its parameters
-        are correctly optimized end-to-end with the GNN.
         """
-        recording_id    = sample["recording_id"]
-        activity_id     = sample["activity_id"]
-        label           = sample["label"]
-        graph           = self.task_graphs[activity_id]
-        N_nodes         = len(graph.nodes)
-        text_embeddings = self._get_text_embeddings(activity_id).clone()  # (N_nodes, 256)
+        recording_id      = sample["recording_id"]
+        activity_id       = sample["activity_id"]
+        label             = sample["label"]
+        graph             = self.task_graphs[activity_id]
+        N_nodes           = len(graph.nodes)
+        text_embeddings   = self._get_text_embeddings(activity_id).clone()  # (N_nodes, 256)
         visual_embeddings = self._load_visual_embeddings(recording_id)
 
-        # --- Hungarian matching ---
         if visual_embeddings is not None and visual_embeddings.shape[0] > 0:
             matches = match_visual_to_graph(visual_embeddings, text_embeddings, min_score=self.sim_threshold)
         else:
             matches = []
 
-        # --- Build vis_feats: zeros everywhere, L2-norm visual for matched nodes ---
         vis_feats    = torch.zeros(N_nodes, 256)
         matched_mask = torch.zeros(N_nodes, dtype=torch.bool)
         if matches:
@@ -214,20 +194,19 @@ class TaskGraphDataset(Dataset):
             vis_feats[node_indices]    = matched_vis
             matched_mask[node_indices] = True
 
-        # --- Build edge_index in PyG format ---
         if graph.edges:
             src = torch.tensor([e[0] for e in graph.edges], dtype=torch.long)
             dst = torch.tensor([e[1] for e in graph.edges], dtype=torch.long)
-            edge_index = torch.stack([src, dst], dim=0)   # (2, N_edges)
+            edge_index = torch.stack([src, dst], dim=0)
         else:
             edge_index = torch.zeros(2, 0, dtype=torch.long)
 
         data = Data(
-            text_feats   = text_embeddings,                         # (N_nodes, 256)
-            vis_feats    = vis_feats,                               # (N_nodes, 256)
-            matched_mask = matched_mask,                            # (N_nodes,) bool
-            edge_index   = edge_index,                              # (2, N_edges)
-            y            = torch.tensor([label], dtype=torch.float32),  # (1,)
+            text_feats   = text_embeddings,
+            vis_feats    = vis_feats,
+            matched_mask = matched_mask,
+            edge_index   = edge_index,
+            y            = torch.tensor([label], dtype=torch.float32),
             num_nodes    = N_nodes,
         )
         data.recording_id = recording_id
@@ -250,26 +229,19 @@ class TaskGraphDataset(Dataset):
         sample = self.samples[idx]
         recording_id = sample["recording_id"]
 
-        # Try to load from cache
         cache_path = self._cache_path(recording_id)
         if cache_path is not None and cache_path.exists():
             return torch.load(cache_path, weights_only=False)
 
-        # Build from scratch
         data = self._build_pyg_data(sample)
 
-        # Save to cache for future epochs
         if cache_path is not None:
             torch.save(data, cache_path)
 
         return data
 
     def prebuild_cache(self) -> None:
-        """
-        Pre-build and cache all realizations before training starts.
-        Call this once at the beginning of the training script to avoid
-        rebuilding during the first epoch (which would be slow and uneven).
-        """
+        """Pre-build and cache all realizations before training starts."""
         missing = [
             s for s in self.samples
             if self._cache_path(s["recording_id"]) is None
@@ -288,10 +260,6 @@ class TaskGraphDataset(Dataset):
             if (i + 1) % 50 == 0:
                 print(f"  {i + 1}/{len(missing)} done")
         print("[TaskGraphDataset] Cache build complete.")
-
-    # ------------------------------------------------------------------
-    # LOO utility: list all unique activity_ids in this split
-    # ------------------------------------------------------------------
 
     def get_activity_ids(self) -> List[int]:
         return sorted({s["activity_id"] for s in self.samples})

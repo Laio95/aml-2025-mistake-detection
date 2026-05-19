@@ -5,16 +5,20 @@ Assembles the "realization" of a task graph for a given video: a DAG where
 matched nodes have their features updated by fusing textual and visual
 information, and unmatched nodes retain their text-only features.
 
-Two public symbols are exported:
-  - NodeFusionProjector  : learnable nn.Module (Linear 512→256).
-                           Instantiated once and shared across all videos.
-                           Optimized end-to-end during GNN training in Step 4.
-  - build_realization()  : pure function that assembles one TaskRealization
-                           given pre-computed embeddings and matches.
+NOTE: this file is NOT part of the EXTENSION substep 4 training pipeline.
+The EXTENSION substep 4 training loop (extension/step4/train_dag_classifier.py) uses
+TaskGraphDataset (extension/step4/dataset.py), which builds a pre-fusion
+cache storing raw text_feats and vis_feats; the DifferenceFusionProjector
+is applied inside DAGClassifier.forward() at training time.
+This file exists only for manual sanity checks in hungarian_matching.ipynb.
 
-Separation of concerns:
-  The caller (B4 training loop) owns the projector and its optimizer.
-  This module only defines the fusion logic and the output data structure.
+Public symbols:
+  - TaskRealization  : dataclass with node features, edge_index, matched_mask.
+  - build_realization(): assembles one TaskRealization given pre-computed embeddings
+                         and matches. Accepts any nn.Module as projector.
+
+Note: fusion projectors (NodeFusionProjector v1, DifferenceFusionProjector v2)
+are defined in extension/step4/dag_classifier.py, not here.
 """
 
 from dataclasses import dataclass
@@ -34,12 +38,11 @@ class TaskRealization:
 
     node_features : (N_nodes, 256) float32
         Text features for unmatched nodes.
-        Fused text+visual features (via NodeFusionProjector) for matched nodes.
+        Fused features (via projector) for matched nodes.
     edge_index    : (2, N_edges) int64
         DAG edges in PyTorch Geometric convention: edge_index[0]=src, edge_index[1]=dst.
     matched_mask  : (N_nodes,) bool
         True for nodes that were matched to a detected visual step.
-        Useful for ablation studies (e.g. ablate the feature update contribution).
     recording_id  : str   e.g. "1_7"
     activity_id   : int   recipe identifier
     label         : int   0=correct execution, 1=incorrect execution
@@ -52,50 +55,15 @@ class TaskRealization:
     label         : int
 
 
-class NodeFusionProjector(nn.Module):
-    """
-    Learnable fusion of text and visual features for matched graph nodes.
-
-    For each matched node n with visual step v:
-        updated_feat = Linear([text_feat_n ; visual_feat_v])
-
-    The Linear maps 512 → 256, so the output has the same dimensionality as
-    the input features — compatible with any downstream GNN layer.
-
-    This module is shared across all nodes and all videos in the dataset.
-    It is the only learnable component in the B3 pipeline.
-    """
-
-    def __init__(self, feat_dim: int = 256):
-        super().__init__()
-        self.proj = nn.Linear(feat_dim * 2, feat_dim)
-
-    def forward(
-        self,
-        text_feats  : torch.Tensor,   # (M, 256) — text embeddings of matched nodes
-        visual_feats: torch.Tensor,   # (M, 256) — visual embeddings of matched steps
-    ) -> torch.Tensor:                # (M, 256) — fused features
-        """
-        Args:
-            text_feats:   embeddings from EgoVLP text encoder for M matched nodes
-            visual_feats: embeddings from ActionFormer mean-pooling for M matched steps
-
-        Returns:
-            Fused features of shape (M, 256).
-        """
-        fused = torch.cat([text_feats, visual_feats], dim=-1)  # (M, 512)
-        return self.proj(fused)                                 # (M, 256)
-
-
 def build_realization(
     recording_id     : str,
     activity_id      : int,
     label            : int,
-    visual_embeddings: torch.Tensor,         # (N_vis, 256)
+    visual_embeddings: torch.Tensor,          # (N_vis, 256)
     task_graph       : TaskGraph,
-    text_embeddings  : torch.Tensor,         # (N_nodes, 256)
-    matches          : List[Tuple[int, int]],# [(vis_idx, node_idx), ...]
-    projector        : NodeFusionProjector,
+    text_embeddings  : torch.Tensor,          # (N_nodes, 256)
+    matches          : List[Tuple[int, int]], # [(vis_idx, node_idx), ...]
+    projector        : nn.Module,             # any fusion projector, e.g. NodeFusionProjector
 ) -> TaskRealization:
     """
     Assemble a TaskRealization for one video.
@@ -111,7 +79,7 @@ def build_realization(
         task_graph:        TaskGraph loaded by task_graph_loader.py
         text_embeddings:   (N_nodes, 256) from EgoVLPTextEncoder.encode()
         matches:           output of match_visual_to_graph() — (vis_idx, node_idx) pairs
-        projector:         NodeFusionProjector instance (shared, learnable)
+        projector:         fusion projector nn.Module (shared, learnable)
 
     Returns:
         TaskRealization with updated node features, edge_index, and matched_mask.
