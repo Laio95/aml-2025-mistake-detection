@@ -239,7 +239,7 @@ def train_tvt(args: argparse.Namespace, dataset_kwargs: Dict) -> None:
         run_name = f"tvt_{args.split_mode}"
         if args.split_mode == "recipe":
             run_name += f"_s{args.recipe_split_seed}"
-        wandb.init(project="gnn_task_verification", name=run_name, reinit=True)
+        wandb.init(project=args.wandb_project or "gnn_task_verification", name=run_name, reinit=True)
 
     # --- Training loop (val-guided checkpoint selection) ---
     ckpt_dir = out_dir / "checkpoints"
@@ -342,7 +342,7 @@ def _train_loo_fold(
     # --- WandB ---
     use_wandb = args.enable_wandb and WANDB_AVAILABLE
     if use_wandb:
-        wandb.init(project="gnn_task_verification_loo",
+        wandb.init(project=args.wandb_project or "gnn_task_verification_loo",
                    name=f"fold_{fold_idx}_recipe_{test_activity_id}", reinit=True)
 
     # --- Per-fold checkpoint ---
@@ -477,6 +477,9 @@ def main():
     parser.add_argument("--threshold",     type=float, default=0.5)
     parser.add_argument("--num_workers",   type=int,   default=2)
     parser.add_argument("--enable_wandb",  action="store_true")
+    parser.add_argument("--wandb_project", type=str, default=None,
+                        help="WandB project name. Defaults to 'gnn_task_verification' "
+                             "(tvt) or 'gnn_task_verification_loo' (loo).")
 
     args = parser.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
