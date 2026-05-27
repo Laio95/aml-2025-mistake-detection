@@ -44,9 +44,9 @@ class TaskVerifier(nn.Module):
         self,
         d_model: int = 256,
         nhead: int = 4,
-        num_layers: int = 2,
+        num_layers: int = 1,
         dim_feedforward: int = 512,
-        dropout: float = 0.1,
+        dropout: float = 0.5,
     ):
         super().__init__()
 

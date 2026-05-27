@@ -247,7 +247,7 @@ def main():
     parser.add_argument("--num_workers",  type=int,   default=2)
 
     # ── model ──────────────────────────────────────────────────────────────
-    parser.add_argument("--num_layers",   type=int,   default=2)
+    parser.add_argument("--num_layers",   type=int,   default=1)
     parser.add_argument("--dropout",      type=float, default=0.5)
 
     # ── logging ────────────────────────────────────────────────────────────
