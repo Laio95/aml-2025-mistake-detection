@@ -12,7 +12,7 @@ Architecture:
         → Linear(hidden_dim*(L+1) → 1)                        [classifier]
         → BCEWithLogitsLoss
 
-DifferenceFusionProjector: proj(t - v) → Linear(256 → 256)
+DifferenceFusionProjector: proj(t - v) → Linear(256 → out_dim)
   Semantic: in EgoVLP joint space, (t - v) is the gap between expected (t) and observed (v).
   Correct execution: t ≈ v → t - v ≈ 0; Error: t - v has a characteristic direction.
   Unmatched nodes: vis_feats = 0 → t - 0 = t (text features preserved as projector input).
@@ -238,7 +238,7 @@ class DAGClassifier(nn.Module):
             [DAGNNConv(hidden_dim) for _ in range(num_layers)]
         )
 
-        # Readout: MaxPool over target nodes, concat h^0..h^L
+        # Readout: global MeanPool, concat h^0..h^L
         # → vector of size hidden_dim * (num_layers + 1)
         readout_dim = hidden_dim * (num_layers + 1)
         self.head = nn.Linear(readout_dim, 1)

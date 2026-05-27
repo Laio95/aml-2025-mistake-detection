@@ -105,7 +105,7 @@ def eval_fold(model, loader, criterion, device, threshold: float = 0.5):
 # Training — one LOO fold
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_fold(fold_idx, activity_id, train_loader, test_loader, args, device, output_dir):
+def train_fold(fold_idx, activity_id, train_loader, test_loader, args, device, output_dir, pos_weight: float):
     """
     Train TaskVerifier for one LOO fold and return the best metrics achieved.
 
@@ -129,11 +129,11 @@ def train_fold(fold_idx, activity_id, train_loader, test_loader, args, device, o
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     scheduler = ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.1, patience=5,
-        threshold=1e-4, threshold_mode="abs", min_lr=1e-7,
+        optimizer, mode="max", factor=0.5, patience=10,
+        threshold=1e-4, threshold_mode="abs", min_lr=1e-5,
     )
     criterion = nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor([args.pos_weight], dtype=torch.float32).to(device)
+        pos_weight=torch.tensor([pos_weight], dtype=torch.float32).to(device)
     )
 
     ckpt_dir  = Path(output_dir) / "checkpoints"
@@ -241,8 +241,6 @@ def main():
     parser.add_argument("--num_epochs",   type=int,   default=50)
     parser.add_argument("--lr",           type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-3)
-    parser.add_argument("--pos_weight",   type=float, default=None,
-                        help="BCEWithLogitsLoss pos_weight; auto-computed from class distribution if omitted")
     parser.add_argument("--threshold",    type=float, default=0.5,
                         help="sigmoid threshold for F1 and Accuracy (default: 0.5)")
     parser.add_argument("--seed",         type=int,   default=42)
@@ -250,7 +248,7 @@ def main():
 
     # ── model ──────────────────────────────────────────────────────────────
     parser.add_argument("--num_layers",   type=int,   default=2)
-    parser.add_argument("--dropout",      type=float, default=0.1)
+    parser.add_argument("--dropout",      type=float, default=0.5)
 
     # ── logging ────────────────────────────────────────────────────────────
     parser.add_argument("--enable_wandb", action="store_true",
@@ -266,13 +264,11 @@ def main():
     # ── load dataset ───────────────────────────────────────────────────────
     samples = load_samples(args.annotations_path, args.step_embeddings_dir)
 
-    # ── compute pos_weight from actual class distribution ──────────────────
-    if args.pos_weight is None:
-        n_correct   = sum(s["label"] == 0 for s in samples)
-        n_incorrect = sum(s["label"] == 1 for s in samples)
-        args.pos_weight = n_correct / n_incorrect
-        print(f"Class distribution — correct: {n_correct}, incorrect: {n_incorrect}")
-    print(f"pos_weight = {args.pos_weight:.4f}\n")
+    # ── pos_weight info ────────────────────────────────────────────────────
+    n_correct   = sum(s["label"] == 0 for s in samples)
+    n_incorrect = sum(s["label"] == 1 for s in samples)
+    print(f"Class distribution — correct: {n_correct}, incorrect: {n_incorrect}")
+    print(f"Global pos_weight = {n_correct / n_incorrect:.4f} (fold-adaptive per fold)\n")
 
     # ── build LOO folds ────────────────────────────────────────────────────
     folds = make_loo_splits(samples)
@@ -294,6 +290,12 @@ def main():
         train_loader = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
         test_loader  = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
+        n_pos   = sum(s["label"] == 1 for s in train_samples)
+        n_neg   = sum(s["label"] == 0 for s in train_samples)
+        fold_pw = n_neg / n_pos if n_pos > 0 else 1.0
+        print(f"  fold pos_weight = {fold_pw:.4f}  "
+              f"(n_correct={n_neg}, n_incorrect={n_pos})")
+
         best = train_fold(
             fold_idx=fold_idx,
             activity_id=activity_id,
@@ -302,6 +304,7 @@ def main():
             args=args,
             device=device,
             output_dir=args.output_dir,
+            pos_weight=fold_pw,
         )
         all_results.append({"fold": fold_idx, "activity_id": activity_id, **best})
 
