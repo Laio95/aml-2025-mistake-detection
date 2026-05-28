@@ -34,7 +34,7 @@ from torch_geometric.nn import global_mean_pool
 # Fusion projectors
 # ---------------------------------------------------------------------------
 
-# ── v1 (concat) — kept for reference; used by build_realization() in step3 ──
+# ── v1 (concat) — kept for reference ──
 # class NodeFusionProjector(nn.Module):
 #     """concat([t, v]) → Linear(512→256). ~131K params — overfits on small LOO."""
 #     def __init__(self, feat_dim: int = 256):
