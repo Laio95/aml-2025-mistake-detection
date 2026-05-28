@@ -91,7 +91,4 @@ class EgoVLPTextEncoder:
         # Internally: DistilBERT → CLS pooling → linear projection → (N, 256)
         embeddings = self.model.compute_text(tokens)  # (N, 256)
 
-        # L2-normalize so hungarian_matcher can use raw dot product as cosine similarity
-        embeddings = F.normalize(embeddings, p=2, dim=-1)  # (N, 256)
-
         return embeddings.cpu()
