@@ -3,7 +3,7 @@ Extension Step 4 — DAGClassifier (DAGNN) Training
 ==================================================
 Three split modes via --split_mode:
 
-  official  Official CaptainCook4D recording-level split (combined_recordings.json).
+  video     CaptainCook4D recording-level split (combined_recordings.json).
             All 24 recipes appear in every split.
 
   recipe    16 train / 4 val / 4 test recipes, seed-controlled (--recipe_split_seed).
@@ -12,7 +12,7 @@ Three split modes via --split_mode:
   loo       Leave-One-Out: one fold per recipe (24 folds), same protocol as B2.
             Enables protocol-consistent comparison with TaskVerifier (B2).
 
-TVT modes (official / recipe):
+TVT modes (video / recipe):
   Val set drives LR scheduling and checkpoint selection.
   Test set is evaluated once at the end on the best-val-AUC checkpoint.
 
@@ -190,12 +190,12 @@ def train_tvt(args: argparse.Namespace, dataset_kwargs: Dict) -> None:
     device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # --- Build split ---
-    if args.split_mode == "official":
+    if args.split_mode == "video":
         if args.splits_json is None:
-            raise ValueError("--splits_json required for --split_mode official")
-        print("Loading official train/val/test split...")
+            raise ValueError("--splits_json required for --split_mode video")
+        print("Loading video train/val/test split...")
         train_ids, val_ids, test_ids = load_split_from_json(args.splits_json)
-        split_meta = {"split_mode": "official", "splits_json": args.splits_json}
+        split_meta = {"split_mode": "video", "splits_json": args.splits_json}
     else:
         print(f"Building recipe split (seed={args.recipe_split_seed})...")
         train_ids, val_ids, test_ids = make_recipe_split(
@@ -458,10 +458,10 @@ def main():
     parser.add_argument("--cache_dir",           required=True)
     parser.add_argument("--output_dir",          required=True)
     parser.add_argument("--splits_json",         default=None,
-                        help="path to combined_recordings.json (required for --split_mode official)")
+                        help="path to combined_recordings.json (required for --split_mode video)")
 
     # Split mode
-    parser.add_argument("--split_mode", choices=["official", "recipe", "loo"], default="official")
+    parser.add_argument("--split_mode", choices=["video", "recipe", "loo"], default="video")
     parser.add_argument("--recipe_split_seed", type=int, default=42,
                         help="RNG seed for recipe split (ignored for other modes)")
 
