@@ -1,39 +1,42 @@
-# AML/DAAI 2025 - Mistake Detection Project
+# AML 2025/2026 - Mistake Detection Project
+
+## Team
+
+| Name | Matricola |
+|------|-----------|
+| Dario Lupo | s336550 |
+| Alberto Giunti | s336374 |
+| Marco Laiolo | s283816 |
+| Angelo Rosario Modica | s344983 |
+
+## Notebooks
+
+The experiments are organized as numbered notebooks inside the `notebooks/` directory. Each notebook corresponds to a specific step of the pipeline and should be run in order within each group:
+
+- **A\*** — Error recognition track (baseline reproduction, LSTM, EgoVLP extraction and training, backbone comparison)
+- **B\*** — Step localization and graph-based fusion track
+
+> **Note**: Some notebooks rely on code from git submodules (e.g. feature extractors, ActionFormer). Make sure to initialize all submodules before running them:
+> ```
+> git submodule update --init --recursive
+> ```
 
 ## Environment Setup
 
-First of all, create a python environment with 
+The notebooks are designed to run on **Google Colab**. A personal Google Drive must be mounted as storage for datasets, features, and checkpoints:
 
-```
-python -m venv .venv
-pip install -r requirements.txt
-```
-
-Then, download the pre-extracted features for 1s segments and put them in the `data/features` directory.
-
-## Step 1: Baselines reproduction
-Download the official best checkpoints from [here](https://utdallas.app.box.com/s/uz3s1alrzucz03sleify8kazhuc1ksl3) (`error_recognition_best` directory) and place them in the `checkpoints`. Then run the evaluation for the error recognition task.
-
-**Example command**:
-```
-python -m core.evaluate --variant MLP --backbone omnivore --ckpt checkpoints/error_recognition_best/MLP/omnivore/error_recognition_MLP_omnivore_step_epoch_43.pt --split step --threshold 0.6
+```python
+from google.colab import drive
+drive.mount('/content/drive')
 ```
 
-You should be able to reproduce results close to those reported in the paper (Table 2):
-
-| Split | Model | F1 | AUC |
-|-------|-------|----|-----|
-| Step | MLP (Omnivore) | 24.26 | 75.74 |
-| Recordings | MLP (Omnivore) | 55.42 | 63.03 |
-| Step | Transf. (Omnivore) | 55.39 | 75.62 |
-| Recordings | Transf. (Omnivore) | 40.73 | 62.27 |
-
-**NOTE**: Use the thresholds indicated in the official README.md of project (0.6 for step and 0.4 for recordings steps).
+All paths to data and resources in the notebooks refer to the mounted Drive structure.
 
 ## Acknowledgements
 
-This project builds on many repositories from the CaptainCook4D release. Please refer to the original codebases for more details.
+This project builds on repositories from the CaptainCook4D release.
 
-**Error Recognition**: https://github.com/CaptainCook4D/error_recognition
-
-**Features Extraction**: https://github.com/CaptainCook4D/feature_extractors
+- **Error Recognition**: https://github.com/CaptainCook4D/error_recognition
+- **Features Extraction**: https://github.com/CaptainCook4D/feature_extractors
+- **ActionFormer**: https://github.com/happyharrycn/actionformer_release
+- **EgoVLP**: https://github.com/showlab/EgoVLP
