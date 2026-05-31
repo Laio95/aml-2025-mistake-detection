@@ -30,13 +30,13 @@ from google.colab import drive
 drive.mount('/content/drive')
 ```
 
-All paths to data and resources in the notebooks reference a `DRIVE_ROOT` variable (default: `/content/drive/MyDrive/AML_Project`). Update this variable at the top of each notebook to match your own Drive structure.
+All paths to data and resources in the notebooks reference a `DRIVE_ROOT` variable (default: `/content/drive/MyDrive/AML_Project`). Update this variable at the top of each notebook to match your own Drive structure. Additional paths may require customization depending on how data is organized on your Drive — refer to the path configuration cells at the beginning of each notebook before running it.
 
 ### Required data
 
-- **Pre-extracted features**: the CaptainCook4D pre-extracted features (1s segments), expected at `{DRIVE_ROOT}/CaptainCook4D/features`.
+- **Pre-extracted features**: the CaptainCook4D pre-extracted features (1s segments) as a zip archive, expected at `{DRIVE_ROOT}/CaptainCook4D/1s.zip`.
 - **Videos**: the CaptainCook4D GoPro resized dataset (`captain_cook_4d_gopro_resized_extracted`), expected at `{DRIVE_ROOT}/CaptainCook4D/captain_cook_4d_gopro_resized_extracted`.
-- **EgoVLP checkpoint**: the pretrained weights `EgoVLP_PT_BEST.pth` (available from the [EgoVLP release page](https://github.com/showlab/EgoVLP)), expected at `{DRIVE_ROOT}/models/EgoVLP_PT_BEST.pth`.
+- **EgoVLP checkpoint**: the pretrained weights `EgoVLP_PT_BEST.pth` (available from the [EgoVLP release page](https://github.com/showlab/EgoVLP)), expected at `{DRIVE_ROOT}/models/egovlp.pth`.
 
 ## Acknowledgements
 
